@@ -1,0 +1,1564 @@
+name: Build Timer Pro
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Create project files
+        run: |
+          mkdir -p $(dirname 'settings.gradle.kts')
+          cat > 'settings.gradle.kts' <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "FloatingTimer"
+          include(":app")
+          EOF_FILE
+
+          mkdir -p $(dirname 'build.gradle.kts')
+          cat > 'build.gradle.kts' <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+
+          mkdir -p $(dirname 'gradle.properties')
+          cat > 'gradle.properties' <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF_FILE
+
+          mkdir -p $(dirname 'app/build.gradle.kts')
+          cat > 'app/build.gradle.kts' <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.floatingtimer"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.fresh2026.timerpro"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "2.0"
+              }
+
+              signingConfigs {
+                  getByName("debug") {
+                      storeFile = file("../fixed.p12")
+                      storePassword = "android"
+                      keyAlias = "androiddebugkey"
+                      keyPassword = "android"
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF_FILE
+
+          mkdir -p $(dirname 'app/src/main/AndroidManifest.xml')
+          cat > 'app/src/main/AndroidManifest.xml' <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <!-- No INTERNET permission on purpose: this app cannot send data anywhere -->
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="Timer Pro"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name="com.example.floatingtimer.MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name="com.example.floatingtimer.TimerService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="floating_timer_overlay" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+
+          mkdir -p $(dirname 'app/src/main/res/values/themes.xml')
+          cat > 'app/src/main/res/values/themes.xml' <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#0E1320</item>
+                  <item name="android:statusBarColor">#0E1320</item>
+                  <item name="android:navigationBarColor">#0E1320</item>
+              </style>
+          </resources>
+          EOF_FILE
+
+          mkdir -p $(dirname 'app/src/main/res/drawable/ic_launcher.xml')
+          cat > 'app/src/main/res/drawable/ic_launcher.xml' <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#2979FF"
+                  android:pathData="M54,54m-50,0a50,50 0,1 1,100 0a50,50 0,1 1,-100 0" />
+              <path
+                  android:fillColor="#00000000"
+                  android:strokeColor="#FFFFFF"
+                  android:strokeWidth="6"
+                  android:strokeLineCap="round"
+                  android:strokeLineJoin="round"
+                  android:pathData="M54,28L54,54L72,66" />
+          </vector>
+          EOF_FILE
+
+          mkdir -p $(dirname 'app/src/main/java/com/example/floatingtimer/Prefs.kt')
+          cat > 'app/src/main/java/com/example/floatingtimer/Prefs.kt' <<'EOF_FILE'
+          package com.example.floatingtimer
+
+          import android.content.Context
+          import android.content.SharedPreferences
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.widget.TextView
+
+          object Prefs {
+              const val NAME = "settings_v2"
+              const val BG = "bg_color"
+              const val FG = "text_color"
+              const val RADIUS = "radius"
+              const val SIZE = "size"
+              const val ALPHA = "alpha"
+              const val SOUND_ON = "sound_on"
+              const val VIB_ON = "vib_on"
+              const val SOUND_ID = "sound_id"
+              const val SOUND_URI = "sound_uri"
+              const val RING_SECS = "ring_secs"
+              const val COUNTDOWN = "countdown"
+              const val MINUTES = "minutes"
+              const val X = "x"
+              const val Y = "y"
+
+              const val DEF_SIZE = 14
+              val DEF_BG = 0xFF2979FF.toInt()
+
+              val PALETTE = intArrayOf(
+                  0xFFF44336.toInt(), 0xFFE91E63.toInt(), 0xFF9C27B0.toInt(),
+                  0xFF673AB7.toInt(), 0xFF3F51B5.toInt(), 0xFF2196F3.toInt(),
+                  0xFF03A9F4.toInt(), 0xFF00BCD4.toInt(), 0xFF009688.toInt(),
+                  0xFF4CAF50.toInt(), 0xFF8BC34A.toInt(), 0xFFCDDC39.toInt(),
+                  0xFFFFEB3B.toInt(), 0xFFFFC107.toInt(), 0xFFFF9800.toInt(),
+                  0xFFFF5722.toInt(), 0xFF795548.toInt(), 0xFF9E9E9E.toInt(),
+                  0xFF607D8B.toInt(), 0xFF000000.toInt(), 0xFFFFFFFF.toInt(),
+                  0xFF0D47A1.toInt(), 0xFF8E0000.toInt(), 0xFF69F0AE.toInt()
+              )
+          }
+
+          fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+          /** Applies colours, size, padding and roundness to a bubble (used by the service and the app preview). */
+          fun styleBubble(tv: TextView, p: SharedPreferences, bgOverride: Int? = null) {
+              val d = tv.resources.displayMetrics.density
+              val size = p.getInt(Prefs.SIZE, Prefs.DEF_SIZE)
+              val radius = p.getInt(Prefs.RADIUS, 100)
+              tv.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+              tv.textSize = size.toFloat()
+              tv.setTextColor(p.getInt(Prefs.FG, Color.WHITE))
+              val padH = (size * d * 0.9f).toInt()
+              val padV = (size * d * 0.45f).toInt()
+              tv.setPadding(padH, padV, padH, padV)
+              val fm = tv.paint.fontMetrics
+              val estH = (fm.bottom - fm.top) + 2 * padV
+              tv.background = GradientDrawable().apply {
+                  setColor(bgOverride ?: p.getInt(Prefs.BG, Prefs.DEF_BG))
+                  cornerRadius = estH / 2f * radius / 100f
+              }
+          }
+          EOF_FILE
+
+          mkdir -p $(dirname 'app/src/main/java/com/example/floatingtimer/Sound.kt')
+          cat > 'app/src/main/java/com/example/floatingtimer/Sound.kt' <<'EOF_FILE'
+          package com.example.floatingtimer
+
+          import android.content.Context
+          import android.media.AudioAttributes
+          import android.media.AudioFormat
+          import android.media.AudioTrack
+          import android.media.Ringtone
+          import android.media.RingtoneManager
+          import android.net.Uri
+          import android.os.Build
+          import kotlin.math.PI
+          import kotlin.math.abs
+          import kotlin.math.exp
+          import kotlin.math.min
+          import kotlin.math.sin
+
+          /** Builds the alarm sounds in code, so no sound files are needed. */
+          object Synth {
+              const val RATE = 22050
+
+              val NAMES = listOf(
+                  "bell" to "Classic Bell",
+                  "beep" to "Digital Beep",
+                  "chime" to "Soft Chime",
+                  "rising" to "Rising Alarm",
+                  "siren" to "Siren",
+                  "dingdong" to "Ding-Dong"
+              )
+
+              private class Mix(seconds: Float) {
+                  val buf = FloatArray((RATE * seconds).toInt())
+
+                  fun note(
+                      start: Float, dur: Float, freq: Float, vol: Float, decay: Float,
+                      harm: List<Pair<Float, Float>> = listOf(1f to 1f), square: Boolean = false
+                  ) {
+                      val s = (start * RATE).toInt()
+                      val n = (dur * RATE).toInt()
+                      for (i in 0 until n) {
+                          val idx = s + i
+                          if (idx >= buf.size) break
+                          val t = i.toFloat() / RATE
+                          var env = min(1f, t / 0.004f) * exp(-decay * t)
+                          val tail = dur - t
+                          if (tail < 0.02f) env *= tail / 0.02f
+                          var v = 0f
+                          for ((ratio, amp) in harm) {
+                              v += amp * sin(2.0 * PI * freq * ratio * t).toFloat()
+                          }
+                          if (square) v = if (v >= 0f) 0.6f else -0.6f
+                          buf[idx] += v * vol * env
+                      }
+                  }
+
+                  fun pcm(): ShortArray {
+                      var peak = 0.0001f
+                      for (x in buf) peak = maxOf(peak, abs(x))
+                      val g = 0.9f / peak
+                      return ShortArray(buf.size) {
+                          (buf[it] * g * 32767f).toInt().coerceIn(-32768, 32767).toShort()
+                      }
+                  }
+              }
+
+              fun build(id: String): ShortArray = when (id) {
+                  "beep" -> {
+                      val m = Mix(1.0f)
+                      for (i in 0 until 4) m.note(i * 0.18f, 0.1f, 1200f, 1f, 0f, square = true)
+                      m.pcm()
+                  }
+                  "chime" -> {
+                      val m = Mix(2.4f)
+                      val h = listOf(1f to 1f, 2f to 0.25f)
+                      val notes = floatArrayOf(1046.5f, 1318.5f, 1568f, 2093f)
+                      for (i in notes.indices) m.note(i * 0.28f, 1.1f, notes[i], 1f, 3.5f, h)
+                      m.pcm()
+                  }
+                  "rising" -> {
+                      val m = Mix(1.4f)
+                      val h = listOf(1f to 1f, 2f to 0.3f, 3f to 0.15f)
+                      val f = floatArrayOf(600f, 800f, 1000f, 1300f)
+                      for (i in f.indices) m.note(i * 0.28f, 0.22f, f[i], 1f, 0f, h)
+                      m.pcm()
+                  }
+                  "siren" -> {
+                      val m = Mix(1.6f)
+                      var phase = 0.0
+                      for (i in m.buf.indices) {
+                          val t = i.toDouble() / RATE
+                          val f = 900.0 + 350.0 * sin(2.0 * PI * t / 1.6)
+                          phase += 2.0 * PI * f / RATE
+                          m.buf[i] = (0.6 * sin(phase)).toFloat()
+                      }
+                      m.pcm()
+                  }
+                  "dingdong" -> {
+                      val m = Mix(2.2f)
+                      val h = listOf(1f to 1f, 2f to 0.35f, 3f to 0.1f)
+                      m.note(0f, 1.0f, 880f, 1f, 3f, h)
+                      m.note(0.6f, 1.4f, 660f, 1f, 2.5f, h)
+                      m.pcm()
+                  }
+                  else -> {
+                      val m = Mix(2.2f)
+                      val bell = listOf(1f to 1f, 2f to 0.55f, 2.76f to 0.4f, 5.4f to 0.2f)
+                      m.note(0f, 1.6f, 784f, 1f, 3.2f, bell)
+                      m.note(0.7f, 1.4f, 784f, 1f, 3.2f, bell)
+                      m.pcm()
+                  }
+              }
+          }
+
+          /** Plays a built-in sound, the phone's alarm sound, or a sound picked from the phone (looping until stop()). */
+          class SoundPlayer(private val ctx: Context) {
+              private var track: AudioTrack? = null
+              private var ringtone: Ringtone? = null
+
+              var isPlaying = false
+                  private set
+
+              private fun attrs() = AudioAttributes.Builder()
+                  .setUsage(AudioAttributes.USAGE_ALARM)
+                  .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                  .build()
+
+              fun play(id: String, uri: String?) {
+                  stop()
+                  try {
+                      when (id) {
+                          "phone" -> playRingtone(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM))
+                          "custom" -> playRingtone(
+                              if (uri.isNullOrEmpty()) RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                              else Uri.parse(uri)
+                          )
+                          else -> playSynth(id)
+                      }
+                      isPlaying = true
+                  } catch (e: Exception) {
+                      isPlaying = false
+                  }
+              }
+
+              private fun playRingtone(uri: Uri?) {
+                  val r = RingtoneManager.getRingtone(
+                      ctx, uri ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                  ) ?: return
+                  r.audioAttributes = attrs()
+                  if (Build.VERSION.SDK_INT >= 28) r.isLooping = true
+                  r.play()
+                  ringtone = r
+              }
+
+              private fun playSynth(id: String) {
+                  val data = Synth.build(id)
+                  val t = AudioTrack.Builder()
+                      .setAudioAttributes(attrs())
+                      .setAudioFormat(
+                          AudioFormat.Builder()
+                              .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                              .setSampleRate(Synth.RATE)
+                              .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                              .build()
+                      )
+                      .setBufferSizeInBytes(data.size * 2)
+                      .setTransferMode(AudioTrack.MODE_STATIC)
+                      .build()
+                  t.write(data, 0, data.size)
+                  t.setLoopPoints(0, data.size, -1)
+                  t.play()
+                  track = t
+              }
+
+              fun stop() {
+                  try {
+                      track?.stop()
+                  } catch (e: Exception) {
+                  }
+                  try {
+                      track?.release()
+                  } catch (e: Exception) {
+                  }
+                  track = null
+                  try {
+                      ringtone?.stop()
+                  } catch (e: Exception) {
+                  }
+                  ringtone = null
+                  isPlaying = false
+              }
+          }
+          EOF_FILE
+
+          mkdir -p $(dirname 'app/src/main/java/com/example/floatingtimer/TimerService.kt')
+          cat > 'app/src/main/java/com/example/floatingtimer/TimerService.kt' <<'EOF_FILE'
+          package com.example.floatingtimer
+
+          import android.annotation.SuppressLint
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.ServiceInfo
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.os.PowerManager
+          import android.os.SystemClock
+          import android.os.VibrationEffect
+          import android.os.Vibrator
+          import android.os.VibratorManager
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.HapticFeedbackConstants
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewConfiguration
+          import android.view.WindowManager
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import java.util.Locale
+          import kotlin.math.abs
+
+          /**
+           * Foreground service that shows the floating bubble over other apps.
+           * Tap = pause / resume. Hold ~1.2 s = open the control panel. Drag = move.
+           * Time is measured with elapsedRealtime, so it stays correct with the screen off.
+           */
+          class TimerService : Service() {
+
+              companion object {
+                  const val ACTION_REFRESH = "com.example.floatingtimer.REFRESH"
+                  const val ACTION_STOP = "com.example.floatingtimer.STOP"
+                  const val EXTRA_MINUTES = "minutes"
+                  const val EXTRA_AUTOSTART = "autostart"
+
+                  private const val CH_RUN = "timer_running"
+                  private const val CH_DONE = "timer_done"
+                  private const val ID_RUN = 1
+                  private const val ID_DONE = 2
+                  private const val LONG_PRESS_MS = 1200L
+
+                  @Volatile
+                  var isRunning = false
+              }
+
+              private lateinit var prefs: SharedPreferences
+              private lateinit var nm: NotificationManager
+
+              private var wm: WindowManager? = null
+              private var root: LinearLayout? = null
+              private lateinit var bubble: TextView
+              private lateinit var panel: LinearLayout
+              private lateinit var btnStart: Button
+              private lateinit var btnMode: Button
+              private lateinit var rowPresets: LinearLayout
+              private lateinit var rowAdjust: LinearLayout
+              private lateinit var lp: WindowManager.LayoutParams
+
+              private val handler = Handler(Looper.getMainLooper())
+              private val sound by lazy { SoundPlayer(this) }
+
+              // ---- Timer state ----
+              private var countdown = true
+              private var running = false
+              private var finished = false
+              private var presetMs = 25 * 60_000L
+              private var accumulated = 0L
+              private var startedAt = 0L
+              private var lastNotifSecond = -1L
+
+              private var wakeLock: PowerManager.WakeLock? = null
+
+              private val soundStopper = Runnable { sound.stop() }
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      if (!running) return
+                      if (countdown && elapsed() >= presetMs) {
+                          onFinish()
+                          return
+                      }
+                      refreshUi()
+                      handler.postDelayed(this, 200)
+                  }
+              }
+
+              // ---------- Service lifecycle ----------
+
+              override fun onCreate() {
+                  super.onCreate()
+                  prefs = getSharedPreferences(Prefs.NAME, MODE_PRIVATE)
+                  nm = getSystemService(NotificationManager::class.java)
+                  createChannels()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == ACTION_STOP) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+
+                  startAsForeground()
+
+                  if (root == null) {
+                      if (!Settings.canDrawOverlays(this)) {
+                          stopSelf()
+                          return START_NOT_STICKY
+                      }
+                      countdown = prefs.getBoolean(Prefs.COUNTDOWN, true)
+                      presetMs = prefs.getInt(Prefs.MINUTES, 25).coerceIn(1, 999) * 60_000L
+                      buildOverlay()
+                      isRunning = true
+                  }
+
+                  intent?.let {
+                      if (it.hasExtra(EXTRA_MINUTES)) {
+                          countdown = prefs.getBoolean(Prefs.COUNTDOWN, true)
+                          presetMs = it.getIntExtra(EXTRA_MINUTES, 25).coerceIn(1, 999) * 60_000L
+                          resetTimer()
+                          if (it.getBooleanExtra(EXTRA_AUTOSTART, false)) start()
+                      }
+                      if (it.action == ACTION_REFRESH) applyStyle()
+                  }
+                  refreshUi()
+                  return START_NOT_STICKY
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacksAndMessages(null)
+                  sound.stop()
+                  releaseWake()
+                  try {
+                      root?.let { wm?.removeView(it) }
+                  } catch (e: Exception) {
+                  }
+                  root = null
+                  isRunning = false
+                  super.onDestroy()
+              }
+
+              // ---------- Notifications ----------
+
+              private fun createChannels() {
+                  nm.createNotificationChannel(
+                      NotificationChannel(CH_RUN, "Timer running", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  val done = NotificationChannel(CH_DONE, "Timer finished", NotificationManager.IMPORTANCE_HIGH)
+                  done.setSound(null, null)
+                  done.enableVibration(false)
+                  nm.createNotificationChannel(done)
+              }
+
+              private fun openAppIntent(): PendingIntent = PendingIntent.getActivity(
+                  this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+              )
+
+              @Suppress("DEPRECATION")
+              private fun runningNotification(text: String): Notification {
+                  val stop = PendingIntent.getService(
+                      this, 1,
+                      Intent(this, TimerService::class.java).setAction(ACTION_STOP),
+                      PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return Notification.Builder(this, CH_RUN)
+                      .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                      .setContentTitle("Floating Timer")
+                      .setContentText(text)
+                      .setContentIntent(openAppIntent())
+                      .setOngoing(true)
+                      .setOnlyAlertOnce(true)
+                      .addAction(0, "Stop", stop)
+                      .build()
+              }
+
+              private fun startAsForeground() {
+                  val n = runningNotification(fmt(shownMs()))
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(ID_RUN, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  } else {
+                      startForeground(ID_RUN, n)
+                  }
+              }
+
+              private fun notifyDone() {
+                  val n = Notification.Builder(this, CH_DONE)
+                      .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                      .setContentTitle("Time's up!")
+                      .setContentText("Your timer has finished")
+                      .setContentIntent(openAppIntent())
+                      .setAutoCancel(true)
+                      .build()
+                  nm.notify(ID_DONE, n)
+              }
+
+              // ---------- Overlay (bubble + panel) ----------
+
+              @SuppressLint("ClickableViewAccessibility")
+              private fun buildOverlay() {
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+
+                  val r = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER_HORIZONTAL
+                  }
+
+                  bubble = TextView(this).apply { gravity = Gravity.CENTER }
+
+                  panel = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      minimumWidth = dp(250)
+                      setPadding(dp(8), dp(8), dp(8), dp(8))
+                      background = GradientDrawable().apply {
+                          setColor(0xF0151B2B.toInt())
+                          cornerRadius = dp(18).toFloat()
+                      }
+                      visibility = View.GONE
+                  }
+
+                  btnStart = mkBtn("", 0xFF4F8CFF.toInt()) { toggleRun() }
+                  btnMode = mkBtn("", 0xFF2A3350.toInt()) {
+                      countdown = !countdown
+                      prefs.edit().putBoolean(Prefs.COUNTDOWN, countdown).apply()
+                      resetTimer()
+                  }
+                  rowPresets = row(
+                      mkBtn("5 min") { setPreset(5) },
+                      mkBtn("10") { setPreset(10) },
+                      mkBtn("25") { setPreset(25) },
+                      mkBtn("60") { setPreset(60) }
+                  )
+                  rowAdjust = row(
+                      mkBtn("-1 min") { adjust(-1) },
+                      mkBtn("+1 min") { adjust(1) },
+                      mkBtn("+5 min") { adjust(5) }
+                  )
+
+                  panel.addView(row(btnStart, mkBtn("Reset") { resetTimer() }))
+                  panel.addView(row(btnMode))
+                  panel.addView(rowPresets)
+                  panel.addView(rowAdjust)
+                  panel.addView(row(mkBtn("Hide panel") { togglePanel() }, mkBtn("Exit", 0xFFE5484D.toInt()) { stopSelf() }))
+
+                  r.addView(
+                      bubble,
+                      LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.WRAP_CONTENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      )
+                  )
+                  r.addView(
+                      panel,
+                      LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.WRAP_CONTENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      ).apply { topMargin = dp(6) }
+                  )
+
+                  lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = prefs.getInt(Prefs.X, dp(24))
+                      y = prefs.getInt(Prefs.Y, dp(120))
+                  }
+
+                  // Tap = pause/resume, hold 1.2 s = panel, drag = move
+                  val slop = ViewConfiguration.get(this).scaledTouchSlop
+                  var downX = 0f
+                  var downY = 0f
+                  var startX = 0
+                  var startY = 0
+                  var moved = false
+                  var longDone = false
+                  val longRun = Runnable {
+                      longDone = true
+                      bubble.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                      togglePanel()
+                  }
+                  bubble.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = e.rawX
+                              downY = e.rawY
+                              startX = lp.x
+                              startY = lp.y
+                              moved = false
+                              longDone = false
+                              handler.postDelayed(longRun, LONG_PRESS_MS)
+                              true
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = e.rawX - downX
+                              val dy = e.rawY - downY
+                              if (!moved && (abs(dx) > slop || abs(dy) > slop)) {
+                                  moved = true
+                                  handler.removeCallbacks(longRun)
+                              }
+                              if (moved) {
+                                  lp.x = (startX + dx.toInt()).coerceAtLeast(0)
+                                  lp.y = (startY + dy.toInt()).coerceAtLeast(0)
+                                  wm?.updateViewLayout(root, lp)
+                              }
+                              true
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              handler.removeCallbacks(longRun)
+                              if (moved) {
+                                  prefs.edit().putInt(Prefs.X, lp.x).putInt(Prefs.Y, lp.y).apply()
+                              } else if (!longDone) {
+                                  onBubbleTap()
+                              }
+                              true
+                          }
+                          MotionEvent.ACTION_CANCEL -> {
+                              handler.removeCallbacks(longRun)
+                              true
+                          }
+                          else -> false
+                      }
+                  }
+
+                  root = r
+                  wm?.addView(r, lp)
+                  applyStyle()
+              }
+
+              private fun onBubbleTap() {
+                  if (sound.isPlaying) {
+                      stopAlarm()
+                      return
+                  }
+                  toggleRun()
+              }
+
+              private fun togglePanel() {
+                  val show = panel.visibility != View.VISIBLE
+                  panel.visibility = if (show) View.VISIBLE else View.GONE
+                  root?.post {
+                      val r = root ?: return@post
+                      val screenH = resources.displayMetrics.heightPixels
+                      if (lp.y + r.height > screenH) {
+                          lp.y = (screenH - r.height).coerceAtLeast(0)
+                          wm?.updateViewLayout(r, lp)
+                      }
+                  }
+              }
+
+              private fun mkBtn(label: String, fill: Int = 0xFF2A3350.toInt(), onClick: () -> Unit) =
+                  Button(this).apply {
+                      text = label
+                      isAllCaps = false
+                      textSize = 13f
+                      minWidth = 0
+                      minimumWidth = 0
+                      minHeight = 0
+                      minimumHeight = 0
+                      setPadding(dp(6), dp(10), dp(6), dp(10))
+                      setTextColor(Color.WHITE)
+                      background = GradientDrawable().apply {
+                          setColor(fill)
+                          cornerRadius = dp(10).toFloat()
+                      }
+                      setOnClickListener { onClick() }
+                  }
+
+              private fun row(vararg views: View) = LinearLayout(this).apply {
+                  orientation = LinearLayout.HORIZONTAL
+                  views.forEach {
+                      addView(
+                          it,
+                          LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                              setMargins(dp(2), dp(2), dp(2), dp(2))
+                          }
+                      )
+                  }
+              }
+
+              /** Applies colour, size, roundness and transparency from the saved settings. */
+              private fun applyStyle() {
+                  styleBubble(bubble, prefs, if (finished) 0xFFE53935.toInt() else null)
+                  root?.alpha = prefs.getInt(Prefs.ALPHA, 90) / 100f
+                  bubble.alpha = if (!running && !finished && accumulated > 0L) 0.6f else 1f
+              }
+
+              // ---------- Timer logic ----------
+
+              private fun elapsed(): Long =
+                  accumulated + if (running) SystemClock.elapsedRealtime() - startedAt else 0L
+
+              private fun shownMs(): Long =
+                  if (countdown) (presetMs - elapsed()).coerceAtLeast(0L) else elapsed()
+
+              private fun fmt(ms: Long): String {
+                  val total = if (countdown) (ms + 999) / 1000 else ms / 1000
+                  val h = total / 3600
+                  val m = (total % 3600) / 60
+                  val s = total % 60
+                  return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+                  else String.format(Locale.US, "%02d:%02d", m, s)
+              }
+
+              private fun refreshUi() {
+                  val ms = shownMs()
+                  val t = fmt(ms)
+                  if (bubble.text.toString() != t) bubble.text = t
+                  btnStart.text = if (running) "Pause" else "Start"
+                  btnMode.text = if (countdown) "Mode: Countdown (tap to switch)" else "Mode: Stopwatch (tap to switch)"
+                  val vis = if (countdown) View.VISIBLE else View.GONE
+                  rowPresets.visibility = vis
+                  rowAdjust.visibility = vis
+
+                  val sec = ms / 1000
+                  if (sec != lastNotifSecond) {
+                      lastNotifSecond = sec
+                      nm.notify(ID_RUN, runningNotification(t))
+                  }
+              }
+
+              private fun toggleRun() {
+                  stopAlarm()
+                  if (running) pause() else start()
+              }
+
+              private fun start() {
+                  if (finished || (countdown && accumulated >= presetMs)) resetTimer()
+                  running = true
+                  startedAt = SystemClock.elapsedRealtime()
+                  acquireWake()
+                  applyStyle()
+                  handler.removeCallbacks(tick)
+                  handler.post(tick)
+                  refreshUi()
+              }
+
+              private fun pause() {
+                  accumulated = elapsed()
+                  running = false
+                  handler.removeCallbacks(tick)
+                  releaseWake()
+                  applyStyle()
+                  refreshUi()
+              }
+
+              private fun resetTimer() {
+                  handler.removeCallbacks(tick)
+                  stopAlarm()
+                  releaseWake()
+                  running = false
+                  finished = false
+                  accumulated = 0L
+                  applyStyle()
+                  refreshUi()
+              }
+
+              private fun setPreset(min: Int) {
+                  presetMs = min * 60_000L
+                  resetTimer()
+              }
+
+              private fun adjust(deltaMin: Int) {
+                  presetMs = (presetMs + deltaMin * 60_000L).coerceAtLeast(60_000L)
+                  if (finished) resetTimer() else if (running) acquireWake()
+                  refreshUi()
+              }
+
+              private fun onFinish() {
+                  accumulated = presetMs
+                  running = false
+                  finished = true
+                  handler.removeCallbacks(tick)
+                  releaseWake()
+                  applyStyle()
+                  refreshUi()
+                  if (prefs.getBoolean(Prefs.SOUND_ON, true)) {
+                      sound.play(
+                          prefs.getString(Prefs.SOUND_ID, "bell") ?: "bell",
+                          prefs.getString(Prefs.SOUND_URI, null)
+                      )
+                      handler.removeCallbacks(soundStopper)
+                      handler.postDelayed(soundStopper, prefs.getInt(Prefs.RING_SECS, 20) * 1000L)
+                  }
+                  if (prefs.getBoolean(Prefs.VIB_ON, true)) vibrate()
+                  notifyDone()
+              }
+
+              // ---------- Alarm / vibration / wake lock ----------
+
+              private fun stopAlarm() {
+                  handler.removeCallbacks(soundStopper)
+                  sound.stop()
+                  nm.cancel(ID_DONE)
+              }
+
+              @Suppress("DEPRECATION")
+              private fun vibrate() {
+                  try {
+                      val v: Vibrator? = if (Build.VERSION.SDK_INT >= 31) {
+                          getSystemService(VibratorManager::class.java)?.defaultVibrator
+                      } else {
+                          getSystemService(Vibrator::class.java)
+                      }
+                      v?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 300, 500, 300, 500), -1))
+                  } catch (e: Exception) {
+                  }
+              }
+
+              /** Keeps the CPU awake so the alarm rings on time even with the screen off. */
+              private fun acquireWake() {
+                  releaseWake()
+                  val pm = getSystemService(PowerManager::class.java)
+                  val timeout = if (countdown) {
+                      (presetMs - elapsed()).coerceAtLeast(1_000L) + 5_000L
+                  } else {
+                      6 * 60 * 60 * 1000L
+                  }
+                  wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FloatingTimer:run").apply {
+                      setReferenceCounted(false)
+                      acquire(timeout)
+                  }
+              }
+
+              private fun releaseWake() {
+                  try {
+                      wakeLock?.let { if (it.isHeld) it.release() }
+                  } catch (e: Exception) {
+                  }
+                  wakeLock = null
+              }
+          }
+          EOF_FILE
+
+          mkdir -p $(dirname 'app/src/main/java/com/example/floatingtimer/MainActivity.kt')
+          cat > 'app/src/main/java/com/example/floatingtimer/MainActivity.kt' <<'EOF_FILE'
+          package com.example.floatingtimer
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.media.RingtoneManager
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.Switch
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              private val BG_PAGE = 0xFF0E1320.toInt()
+              private val BG_CARD = 0xFF182033.toInt()
+              private val ACCENT = 0xFF4F8CFF.toInt()
+              private val TEXT_DIM = 0xFF93A0BA.toInt()
+              private val RING_PICK = 7001
+
+              private lateinit var prefs: SharedPreferences
+              private lateinit var permStatus: TextView
+              private lateinit var permBtn: Button
+              private lateinit var minutes: EditText
+              private lateinit var preview: TextView
+              private lateinit var btnCountdown: Button
+              private lateinit var btnStopwatch: Button
+              private lateinit var customName: TextView
+
+              private val preSound by lazy { SoundPlayer(this) }
+              private val handler = Handler(Looper.getMainLooper())
+              private val soundMarks = LinkedHashMap<String, TextView>()
+              private var previewingId: String? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences(Prefs.NAME, MODE_PRIVATE)
+                  setContentView(buildUi())
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  updatePermission()
+              }
+
+              override fun onPause() {
+                  stopPreview()
+                  super.onPause()
+              }
+
+              // ---------- actions ----------
+
+              private fun updatePermission() {
+                  val ok = Settings.canDrawOverlays(this)
+                  permStatus.text = if (ok) "Ready. Overlay permission is granted."
+                  else "One-time setup: allow \"Display over other apps\" so the bubble can float."
+                  permStatus.setTextColor(if (ok) 0xFF69F0AE.toInt() else 0xFFFFB74D.toInt())
+                  permBtn.visibility = if (ok) View.GONE else View.VISIBLE
+              }
+
+              private fun askOverlayPermission() {
+                  startActivity(
+                      Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                  )
+              }
+
+              private fun startTimer() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      askOverlayPermission()
+                      return
+                  }
+                  val m = minutes.text.toString().toIntOrNull()?.coerceIn(1, 999) ?: 25
+                  prefs.edit().putInt(Prefs.MINUTES, m).apply()
+                  stopPreview()
+                  startForegroundService(
+                      Intent(this, TimerService::class.java)
+                          .putExtra(TimerService.EXTRA_MINUTES, m)
+                          .putExtra(TimerService.EXTRA_AUTOSTART, true)
+                  )
+                  moveTaskToBack(true)
+              }
+
+              private fun stopTimer() {
+                  stopService(Intent(this, TimerService::class.java))
+              }
+
+              private fun refreshAll() {
+                  styleBubble(preview, prefs)
+                  if (TimerService.isRunning) {
+                      startService(Intent(this, TimerService::class.java).setAction(TimerService.ACTION_REFRESH))
+                  }
+              }
+
+              // ---------- sound preview ----------
+
+              private fun togglePreview(id: String) {
+                  if (previewingId == id) {
+                      stopPreview()
+                      return
+                  }
+                  stopPreview()
+                  preSound.play(id, prefs.getString(Prefs.SOUND_URI, null))
+                  previewingId = id
+                  handler.postDelayed({ stopPreview() }, 4000)
+              }
+
+              private fun stopPreview() {
+                  handler.removeCallbacksAndMessages(null)
+                  preSound.stop()
+                  previewingId = null
+              }
+
+              @Suppress("DEPRECATION")
+              private fun pickFromPhone() {
+                  val i = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                      putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM or RingtoneManager.TYPE_RINGTONE)
+                      putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Choose alarm sound")
+                      putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                      putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                      prefs.getString(Prefs.SOUND_URI, null)?.let {
+                          putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, Uri.parse(it))
+                      }
+                  }
+                  startActivityForResult(i, RING_PICK)
+              }
+
+              @Suppress("DEPRECATION")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == RING_PICK && resultCode == RESULT_OK) {
+                      val uri: Uri? = data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+                      if (uri != null) {
+                          prefs.edit().putString(Prefs.SOUND_URI, uri.toString())
+                              .putString(Prefs.SOUND_ID, "custom").apply()
+                          updateCustomName()
+                          updateSoundMarks()
+                      }
+                  }
+              }
+
+              private fun updateCustomName() {
+                  val s = prefs.getString(Prefs.SOUND_URI, null)
+                  customName.text = if (s.isNullOrEmpty()) "Pick any sound from your phone"
+                  else try {
+                      RingtoneManager.getRingtone(this, Uri.parse(s))?.getTitle(this) ?: "Custom sound"
+                  } catch (e: Exception) {
+                      "Custom sound"
+                  }
+              }
+
+              private fun updateSoundMarks() {
+                  val sel = prefs.getString(Prefs.SOUND_ID, "bell")
+                  soundMarks.forEach { (id, tv) ->
+                      tv.text = if (id == sel) "●" else "○"
+                      tv.setTextColor(if (id == sel) ACCENT else TEXT_DIM)
+                  }
+              }
+
+              // ---------- UI helpers ----------
+
+              private fun rounded(color: Int, r: Int) = GradientDrawable().apply {
+                  setColor(color)
+                  cornerRadius = dp(r).toFloat()
+              }
+
+              private fun label(text: String, sp: Float = 14f, color: Int = Color.WHITE, bold: Boolean = false) =
+                  TextView(this).apply {
+                      this.text = text
+                      textSize = sp
+                      setTextColor(color)
+                      if (bold) typeface = Typeface.DEFAULT_BOLD
+                  }
+
+              private fun card(title: String, subtitle: String? = null): LinearLayout {
+                  val c = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = rounded(BG_CARD, 18)
+                      setPadding(dp(16), dp(14), dp(16), dp(16))
+                  }
+                  c.addView(label(title, 17f, Color.WHITE, true))
+                  if (subtitle != null) {
+                      c.addView(label(subtitle, 12.5f, TEXT_DIM).apply { setPadding(0, dp(2), 0, 0) })
+                  }
+                  return c
+              }
+
+              private fun addGap(parent: LinearLayout, h: Int) {
+                  parent.addView(View(this), LinearLayout.LayoutParams(1, dp(h)))
+              }
+
+              private fun pill(text: String, fill: Int, onClick: () -> Unit) = Button(this).apply {
+                  this.text = text
+                  isAllCaps = false
+                  textSize = 15f
+                  setTextColor(Color.WHITE)
+                  typeface = Typeface.DEFAULT_BOLD
+                  background = rounded(fill, 14)
+                  stateListAnimator = null
+                  setOnClickListener { onClick() }
+              }
+
+              private fun smallBtn(text: String, onClick: () -> Unit) = Button(this).apply {
+                  this.text = text
+                  isAllCaps = false
+                  textSize = 13f
+                  minWidth = 0
+                  minimumWidth = 0
+                  minHeight = 0
+                  minimumHeight = 0
+                  setPadding(dp(14), dp(8), dp(14), dp(8))
+                  setTextColor(Color.WHITE)
+                  background = rounded(0xFF2A3656.toInt(), 10)
+                  stateListAnimator = null
+                  setOnClickListener { onClick() }
+              }
+
+              private fun tint(s: SeekBar, color: Int) {
+                  s.progressTintList = ColorStateList.valueOf(color)
+                  s.thumbTintList = ColorStateList.valueOf(color)
+              }
+
+              /** A labelled slider that saves to prefs under [key]. */
+              private fun sliderRow(
+                  parent: LinearLayout, title: String, lo: Int, hi: Int, key: String, def: Int,
+                  show: (Int) -> String
+              ) {
+                  val head = label("$title: ${show(prefs.getInt(key, def))}", 13.5f, TEXT_DIM)
+                  head.setPadding(0, dp(12), 0, 0)
+                  val sb = SeekBar(this).apply {
+                      max = hi - lo
+                      progress = prefs.getInt(key, def).coerceIn(lo, hi) - lo
+                      tint(this, ACCENT)
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                              head.text = "$title: ${show(p + lo)}"
+                              if (fromUser) {
+                                  prefs.edit().putInt(key, p + lo).apply()
+                                  refreshAll()
+                              }
+                          }
+
+                          override fun onStartTrackingTouch(s: SeekBar?) {}
+                          override fun onStopTrackingTouch(s: SeekBar?) {}
+                      })
+                  }
+                  parent.addView(head)
+                  parent.addView(sb)
+              }
+
+              private fun colorCard(title: String, subtitle: String, key: String, def: Int): LinearLayout {
+                  val c = card(title, subtitle)
+                  val start = prefs.getInt(key, def)
+                  val bars = arrayOfNulls<SeekBar>(3)
+                  var busy = false
+
+                  fun applyColor(color: Int, fromPalette: Boolean) {
+                      if (fromPalette) {
+                          busy = true
+                          bars[0]?.progress = Color.red(color)
+                          bars[1]?.progress = Color.green(color)
+                          bars[2]?.progress = Color.blue(color)
+                          busy = false
+                      }
+                      prefs.edit().putInt(key, color or 0xFF000000.toInt()).apply()
+                      refreshAll()
+                  }
+
+                  addGap(c, 10)
+                  Prefs.PALETTE.toList().chunked(6).forEach { chunk ->
+                      val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                      chunk.forEach { col ->
+                          val dot = View(this).apply {
+                              background = GradientDrawable().apply {
+                                  shape = GradientDrawable.OVAL
+                                  setColor(col)
+                                  setStroke(dp(2), 0x55FFFFFF)
+                              }
+                              setOnClickListener { applyColor(col, true) }
+                          }
+                          row.addView(
+                              dot,
+                              LinearLayout.LayoutParams(0, dp(40), 1f).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) }
+                          )
+                      }
+                      c.addView(row)
+                  }
+
+                  val names = arrayOf("Red", "Green", "Blue")
+                  val tints = intArrayOf(0xFFFF5252.toInt(), 0xFF69F0AE.toInt(), 0xFF448AFF.toInt())
+                  val values = intArrayOf(Color.red(start), Color.green(start), Color.blue(start))
+                  for (i in 0..2) {
+                      val head = label("${names[i]}", 12.5f, TEXT_DIM).apply { setPadding(0, dp(8), 0, 0) }
+                      val sb = SeekBar(this).apply {
+                          max = 255
+                          progress = values[i]
+                          tint(this, tints[i])
+                          setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                              override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                                  if (busy || !fromUser) return
+                                  applyColor(
+                                      Color.rgb(
+                                          bars[0]!!.progress, bars[1]!!.progress, bars[2]!!.progress
+                                      ), false
+                                  )
+                              }
+
+                              override fun onStartTrackingTouch(s: SeekBar?) {}
+                              override fun onStopTrackingTouch(s: SeekBar?) {}
+                          })
+                      }
+                      bars[i] = sb
+                      c.addView(head)
+                      c.addView(sb)
+                  }
+                  return c
+              }
+
+              private fun soundRow(parent: LinearLayout, id: String, name: String, sub: String? = null) {
+                  val mark = label("○", 18f, TEXT_DIM)
+                  soundMarks[id] = mark
+                  val nameBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val nameTv = label(name, 15f)
+                  nameBox.addView(nameTv)
+                  if (id == "custom") {
+                      customName = label("", 12f, TEXT_DIM)
+                      nameBox.addView(customName)
+                  } else if (sub != null) {
+                      nameBox.addView(label(sub, 12f, TEXT_DIM))
+                  }
+                  val row = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(4), dp(8), dp(4), dp(8))
+                      setOnClickListener {
+                          if (id == "custom" && prefs.getString(Prefs.SOUND_URI, null).isNullOrEmpty()) {
+                              pickFromPhone()
+                          } else {
+                              prefs.edit().putString(Prefs.SOUND_ID, id).apply()
+                              updateSoundMarks()
+                          }
+                      }
+                  }
+                  row.addView(mark, LinearLayout.LayoutParams(dp(30), LinearLayout.LayoutParams.WRAP_CONTENT))
+                  row.addView(nameBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  if (id == "custom") {
+                      row.addView(smallBtn("Browse") { pickFromPhone() })
+                      row.addView(View(this), LinearLayout.LayoutParams(dp(6), 1))
+                  }
+                  row.addView(smallBtn("▶ Play") { togglePreview(id) })
+                  parent.addView(row)
+              }
+
+              // ---------- screen ----------
+
+              private fun buildUi(): View {
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(28), dp(16), dp(32))
+                  }
+
+                  fun add(v: View) {
+                      col.addView(
+                          v,
+                          LinearLayout.LayoutParams(
+                              LinearLayout.LayoutParams.MATCH_PARENT,
+                              LinearLayout.LayoutParams.WRAP_CONTENT
+                          ).apply { bottomMargin = dp(12) }
+                      )
+                  }
+
+                  // Header
+                  val header = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  header.addView(label("Floating Timer", 30f, Color.WHITE, true))
+                  header.addView(label("A small timer that floats over every app", 14f, TEXT_DIM))
+                  header.setPadding(dp(4), 0, 0, dp(4))
+                  add(header)
+
+                  // Live preview
+                  val pv = card("Live preview", "Changes below appear here instantly")
+                  preview = TextView(this).apply {
+                      text = "12:34"
+                      gravity = Gravity.CENTER
+                  }
+                  styleBubble(preview, prefs)
+                  val stage = LinearLayout(this).apply {
+                      gravity = Gravity.CENTER
+                      background = rounded(0xFF0B0F1A.toInt(), 14)
+                      setPadding(0, dp(26), 0, dp(26))
+                  }
+                  stage.addView(preview)
+                  pv.addView(stage, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                  ).apply { topMargin = dp(10) })
+                  add(pv)
+
+                  // Permission
+                  val pm = card("Setup")
+                  permStatus = label("", 13.5f, Color.WHITE).apply { setPadding(0, dp(6), 0, dp(8)) }
+                  permBtn = pill("Allow display over other apps", 0xFF39425F.toInt()) { askOverlayPermission() }
+                  pm.addView(permStatus)
+                  pm.addView(permBtn)
+                  add(pm)
+
+                  // Timer
+                  val tm = card("Timer", "Tap the bubble to pause / resume. Hold it 1 second for controls.")
+                  val seg = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  fun paintSeg() {
+                      val cd = prefs.getBoolean(Prefs.COUNTDOWN, true)
+                      btnCountdown.background = rounded(if (cd) ACCENT else 0xFF2A3656.toInt(), 12)
+                      btnStopwatch.background = rounded(if (!cd) ACCENT else 0xFF2A3656.toInt(), 12)
+                  }
+                  btnCountdown = pill("Countdown", ACCENT) {
+                      prefs.edit().putBoolean(Prefs.COUNTDOWN, true).apply(); paintSeg()
+                  }
+                  btnStopwatch = pill("Stopwatch", ACCENT) {
+                      prefs.edit().putBoolean(Prefs.COUNTDOWN, false).apply(); paintSeg()
+                  }
+                  paintSeg()
+                  seg.addView(btnCountdown, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                      .apply { rightMargin = dp(4) })
+                  seg.addView(btnStopwatch, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                      .apply { leftMargin = dp(4) })
+                  addGap(tm, 10)
+                  tm.addView(seg)
+
+                  tm.addView(label("Countdown time (minutes)", 13.5f, TEXT_DIM).apply { setPadding(0, dp(12), 0, dp(2)) })
+                  minutes = EditText(this).apply {
+                      inputType = InputType.TYPE_CLASS_NUMBER
+                      setText(prefs.getInt(Prefs.MINUTES, 25).toString())
+                      setTextColor(Color.WHITE)
+                      textSize = 20f
+                      typeface = Typeface.DEFAULT_BOLD
+                      background = rounded(0xFF0B0F1A.toInt(), 12)
+                      setPadding(dp(14), dp(10), dp(14), dp(10))
+                  }
+                  tm.addView(minutes)
+                  addGap(tm, 14)
+                  tm.addView(pill("▶  Start floating timer", ACCENT) { startTimer() })
+                  addGap(tm, 8)
+                  tm.addView(pill("■  Stop and remove bubble", 0xFFC62F3A.toInt()) { stopTimer() })
+                  add(tm)
+
+                  // Colours
+                  add(colorCard("Bubble color", "Background of the bubble", Prefs.BG, Prefs.DEF_BG))
+                  add(colorCard("Text color", "Color of the time digits", Prefs.FG, Color.WHITE))
+
+                  // Shape and size
+                  val sh = card("Shape and size")
+                  sliderRow(sh, "Roundness", 0, 100, Prefs.RADIUS, 100) {
+                      when {
+                          it <= 0 -> "Square"
+                          it >= 100 -> "Fully round"
+                          else -> "$it%"
+                      }
+                  }
+                  sliderRow(sh, "Size", 8, 40, Prefs.SIZE, Prefs.DEF_SIZE) { "$it" }
+                  sliderRow(sh, "Opacity", 30, 100, Prefs.ALPHA, 90) { "$it%" }
+                  add(sh)
+
+                  // Sound
+                  val sd = card("Alarm", "What happens when the countdown ends")
+                  addGap(sd, 6)
+                  sd.addView(Switch(this).apply {
+                      text = "Play sound"
+                      setTextColor(Color.WHITE)
+                      isChecked = prefs.getBoolean(Prefs.SOUND_ON, true)
+                      setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(Prefs.SOUND_ON, on).apply() }
+                  })
+                  addGap(sd, 4)
+                  sd.addView(Switch(this).apply {
+                      text = "Vibrate"
+                      setTextColor(Color.WHITE)
+                      isChecked = prefs.getBoolean(Prefs.VIB_ON, true)
+                      setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(Prefs.VIB_ON, on).apply() }
+                  })
+                  sd.addView(label("Choose a sound", 13.5f, TEXT_DIM).apply { setPadding(0, dp(14), 0, dp(2)) })
+                  Synth.NAMES.forEach { (id, name) -> soundRow(sd, id, name) }
+                  soundRow(sd, "phone", "Phone alarm sound", "Your phone's default alarm")
+                  soundRow(sd, "custom", "My own sound")
+                  sliderRow(sd, "Ring for", 5, 60, Prefs.RING_SECS, 20) { "$it sec" }
+                  add(sd)
+                  updateCustomName()
+                  updateSoundMarks()
+
+                  // Tips
+                  val tp = card("Good to know")
+                  tp.addView(label(
+                      "• Tap the bubble: pause / resume (also silences the alarm)\n" +
+                          "• Hold the bubble for about 1 second: open the control panel\n" +
+                          "• Drag the bubble to move it\n" +
+                          "• All settings are saved automatically\n" +
+                          "• If the timer stops in the background: Settings > Apps > Floating Timer > " +
+                          "Battery > Unrestricted",
+                      13.5f, TEXT_DIM
+                  ).apply { setPadding(0, dp(8), 0, 0); setLineSpacing(0f, 1.15f) })
+                  add(tp)
+
+                  return ScrollView(this).apply {
+                      setBackgroundColor(BG_PAGE)
+                      isFillViewport = true
+                      addView(col)
+                  }
+              }
+          }
+          EOF_FILE
+
+      - name: Create fixed signing key
+        run: |
+          base64 -d > fixed.p12 <<'EOF_KEY'
+          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
+          AicQ
+          EOF_KEY
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TimerPro-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
