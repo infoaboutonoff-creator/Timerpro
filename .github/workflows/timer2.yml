@@ -562,6 +562,7 @@ jobs:
           import android.content.res.Configuration
           import android.graphics.Color
           import android.graphics.PixelFormat
+          import android.graphics.Rect
           import android.graphics.drawable.GradientDrawable
           import android.os.Build
           import android.os.Handler
@@ -578,6 +579,7 @@ jobs:
           import android.view.MotionEvent
           import android.view.View
           import android.view.ViewConfiguration
+          import android.view.WindowInsets
           import android.view.WindowManager
           import android.widget.Button
           import android.widget.LinearLayout
@@ -588,7 +590,7 @@ jobs:
           /**
            * Foreground service that shows the floating bubble over other apps.
            * Tap = start / pause. Tap the small reset icon = reset. Hold ~0.3 s = open the control panel.
-           * Drag = move (all the way to the screen edges). Tap anywhere outside = close the panel.
+           * Drag = move (it stays inside the visible screen). Tap anywhere outside = close the panel.
            * Time is measured with elapsedRealtime, so it stays correct with the screen off.
            */
           class TimerService : Service() {
@@ -772,24 +774,38 @@ jobs:
 
               // ---------- Screen helpers ----------
 
+              /** The visible area of the screen: below the status bar, above the navigation bar. */
               @Suppress("DEPRECATION")
-              private fun screenSize(): Pair<Int, Int> {
+              private fun usable(): Rect {
+                  val w = wm ?: return Rect(0, 0, 0, 0)
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      val m = w.currentWindowMetrics
+                      val ins = m.windowInsets.getInsetsIgnoringVisibility(
+                          WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                      )
+                      val b = m.bounds
+                      return Rect(b.left + ins.left, b.top + ins.top, b.right - ins.right, b.bottom - ins.bottom)
+                  }
                   val dm = DisplayMetrics()
-                  wm?.defaultDisplay?.getRealMetrics(dm)
-                  return Pair(dm.widthPixels, dm.heightPixels)
+                  w.defaultDisplay.getRealMetrics(dm)
+                  var top = 0
+                  var bottom = 0
+                  val sb = resources.getIdentifier("status_bar_height", "dimen", "android")
+                  if (sb > 0) top = resources.getDimensionPixelSize(sb)
+                  val nb = resources.getIdentifier("navigation_bar_height", "dimen", "android")
+                  if (nb > 0) bottom = resources.getDimensionPixelSize(nb)
+                  return Rect(0, top, dm.widthPixels, dm.heightPixels - bottom)
               }
 
-              /** The bubble itself may touch every screen edge (the transparent ring around it may go off-screen). */
+              /** The bubble must stay fully inside the visible screen area. */
               private fun limitX(v: Int): Int {
-                  val (sw, _) = screenSize()
-                  val hi = max(sw - bubble.box.width - bubble.pad, -bubble.pad)
-                  return v.coerceIn(-bubble.pad, hi)
+                  val r = usable()
+                  return v.coerceIn(r.left, max(r.right - bubble.box.width, r.left))
               }
 
               private fun limitY(v: Int): Int {
-                  val (_, sh) = screenSize()
-                  val hi = max(sh - bubble.box.height - bubble.pad, -bubble.pad)
-                  return v.coerceIn(-bubble.pad, hi)
+                  val r = usable()
+                  return v.coerceIn(r.top, max(r.bottom - bubble.box.height, r.top))
               }
 
               private fun clampToScreen() {
@@ -873,7 +889,6 @@ jobs:
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                           WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                           WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
                       PixelFormat.TRANSLUCENT
                   ).apply {
@@ -984,11 +999,11 @@ jobs:
                       panel.measure(spec, spec)
                       val needW = max(bubble.holder.width, panel.measuredWidth)
                       val needH = bubble.holder.height + panel.measuredHeight + dp(2)
-                      val (sw, sh) = screenSize()
+                      val ur = usable()
                       var nx = lp.x
                       var ny = lp.y
-                      if (lp.x + needW > sw) nx = max(sw - needW, -bubble.pad)
-                      if (lp.y + needH > sh) ny = max(sh - needH, -bubble.pad)
+                      if (lp.x + needW > ur.right) nx = max(ur.right - needW, ur.left)
+                      if (lp.y + needH > ur.bottom) ny = max(ur.bottom - needH, ur.top)
                       if (nx != lp.x || ny != lp.y) {
                           restoreX = lp.x
                           restoreY = lp.y
