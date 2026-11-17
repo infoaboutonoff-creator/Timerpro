@@ -68,8 +68,8 @@ jobs:
                   applicationId = "com.fresh2026.timerpro"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 2
-                  versionName = "2.0"
+                  versionCode = 4
+                  versionName = "2.2"
               }
 
               signingConfigs {
@@ -112,6 +112,7 @@ jobs:
 
                   <activity
                       android:name="com.example.floatingtimer.MainActivity"
+                      android:windowSoftInputMode="adjustResize"
                       android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -172,7 +173,17 @@ jobs:
           import android.content.SharedPreferences
           import android.graphics.Color
           import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
           import android.graphics.drawable.GradientDrawable
+          import android.graphics.drawable.LayerDrawable
+          import android.os.Build
+          import android.os.VibrationEffect
+          import android.os.Vibrator
+          import android.os.VibratorManager
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
           import android.widget.TextView
 
           object Prefs {
@@ -189,6 +200,13 @@ jobs:
               const val RING_SECS = "ring_secs"
               const val COUNTDOWN = "countdown"
               const val MINUTES = "minutes"
+              const val TOTAL_SECS = "total_secs"
+              const val SHOW_MS = "show_ms"
+              const val THEME = "theme"
+              const val SHADOW_ON = "touch_shadow_on"
+              const val SHADOW_AMT = "touch_shadow_amt"
+              const val HAPTIC_ON = "touch_vib_on"
+              const val HAPTIC_AMT = "touch_vib_amt"
               const val X = "x"
               const val Y = "y"
 
@@ -209,22 +227,127 @@ jobs:
 
           fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-          /** Applies colours, size, padding and roundness to a bubble (used by the service and the app preview). */
-          fun styleBubble(tv: TextView, p: SharedPreferences, bgOverride: Int? = null) {
-              val d = tv.resources.displayMetrics.density
-              val size = p.getInt(Prefs.SIZE, Prefs.DEF_SIZE)
-              val radius = p.getInt(Prefs.RADIUS, 100)
-              tv.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-              tv.textSize = size.toFloat()
-              tv.setTextColor(p.getInt(Prefs.FG, Color.WHITE))
-              val padH = (size * d * 0.9f).toInt()
-              val padV = (size * d * 0.45f).toInt()
-              tv.setPadding(padH, padV, padH, padV)
-              val fm = tv.paint.fontMetrics
-              val estH = (fm.bottom - fm.top) + 2 * padV
-              tv.background = GradientDrawable().apply {
-                  setColor(bgOverride ?: p.getInt(Prefs.BG, Prefs.DEF_BG))
-                  cornerRadius = estH / 2f * radius / 100f
+          /**
+           * The floating bubble: time text + small reset icon inside a rounded box,
+           * with a soft shadow ("halo") behind it that appears while it is touched.
+           * Used by the floating service and by the live preview in the app.
+           */
+          class BubbleViews(ctx: Context) {
+              val time = TextView(ctx).apply { gravity = Gravity.CENTER }
+              val reset = TextView(ctx).apply {
+                  text = "↺"
+                  gravity = Gravity.CENTER
+              }
+              val box = LinearLayout(ctx).apply {
+                  orientation = LinearLayout.HORIZONTAL
+                  gravity = Gravity.CENTER_VERTICAL
+              }
+              val halo = View(ctx).apply { alpha = 0f }
+              val holder = FrameLayout(ctx)
+              val pad: Int = (16 * ctx.resources.displayMetrics.density).toInt()
+
+              init {
+                  box.addView(time)
+                  box.addView(reset)
+                  holder.setPadding(pad, pad, pad, pad)
+                  holder.addView(
+                      halo,
+                      FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT,
+                          FrameLayout.LayoutParams.MATCH_PARENT
+                      )
+                  )
+                  holder.addView(
+                      box,
+                      FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.WRAP_CONTENT,
+                          FrameLayout.LayoutParams.WRAP_CONTENT
+                      )
+                  )
+              }
+
+              /** Applies colours, size, roundness and the shadow size from the saved settings. */
+              fun applyStyle(p: SharedPreferences, bgOverride: Int? = null) {
+                  val d = box.resources.displayMetrics.density
+                  val size = p.getInt(Prefs.SIZE, Prefs.DEF_SIZE)
+                  val radius = p.getInt(Prefs.RADIUS, 100)
+                  val fg = p.getInt(Prefs.FG, Color.WHITE)
+
+                  time.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                  time.textSize = size.toFloat()
+                  time.setTextColor(fg)
+                  reset.textSize = size * 0.95f
+                  reset.setTextColor(fg)
+                  reset.alpha = 0.85f
+
+                  val padH = (size * d * 0.9f).toInt()
+                  val padV = (size * d * 0.45f).toInt()
+                  box.setPadding(padH, padV, (padH * 0.4f).toInt(), padV)
+                  val gap = (size * d * 0.35f).toInt()
+                  reset.setPadding(gap, 0, gap, 0)
+
+                  val fm = time.paint.fontMetrics
+                  val estH = (fm.bottom - fm.top) + 2 * padV
+                  val corner = estH / 2f * radius / 100f
+                  box.background = GradientDrawable().apply {
+                      setColor(bgOverride ?: p.getInt(Prefs.BG, Prefs.DEF_BG))
+                      cornerRadius = corner
+                  }
+
+                  // Shadow behind the bubble (three soft layers)
+                  val amt = p.getInt(Prefs.SHADOW_AMT, 60).coerceIn(0, 100)
+                  val extra = (d * (3f + 11f * amt / 100f)).toInt()
+                  val a = 110f + 120f * amt / 100f
+                  val layers = ArrayList<Drawable>()
+                  for (i in 0..2) {
+                      layers.add(GradientDrawable().apply {
+                          setColor(Color.argb((a * (0.25f + 0.3f * i)).toInt().coerceIn(0, 255), 0, 0, 0))
+                          cornerRadius = corner + extra - extra * i / 3f
+                      })
+                  }
+                  val ld = LayerDrawable(layers.toTypedArray())
+                  for (i in 0..2) {
+                      val inset = extra * i / 3
+                      ld.setLayerInset(i, inset, inset, inset, inset)
+                  }
+                  halo.background = ld
+                  val hp = halo.layoutParams as FrameLayout.LayoutParams
+                  hp.setMargins(-extra, -extra, -extra, -extra)
+                  halo.layoutParams = hp
+              }
+
+              /** Shows or hides the shadow (only if the shadow option is on). */
+              fun showHalo(on: Boolean, p: SharedPreferences) {
+                  halo.animate().cancel()
+                  if (!p.getBoolean(Prefs.SHADOW_ON, true)) {
+                      halo.alpha = 0f
+                      return
+                  }
+                  halo.animate().alpha(if (on) 1f else 0f).setDuration(if (on) 80L else 160L).start()
+              }
+          }
+
+          /** A short vibration when the bubble is touched. Strength comes from the settings. */
+          @Suppress("DEPRECATION")
+          fun touchBuzz(ctx: Context, p: SharedPreferences, mult: Float = 1f) {
+              if (!p.getBoolean(Prefs.HAPTIC_ON, true)) return
+              val amt = p.getInt(Prefs.HAPTIC_AMT, 50).coerceIn(1, 100)
+              val dur = ((10f + amt * 0.4f) * mult).toLong().coerceAtLeast(5L)
+              val amp = (30f + amt * 2.2f).toInt().coerceIn(1, 255)
+              try {
+                  val v: Vibrator? = if (Build.VERSION.SDK_INT >= 31) {
+                      ctx.getSystemService(VibratorManager::class.java)?.defaultVibrator
+                  } else {
+                      ctx.getSystemService(Vibrator::class.java)
+                  }
+                  if (v == null) return
+                  val effect = if (v.hasAmplitudeControl()) {
+                      VibrationEffect.createOneShot(dur, amp)
+                  } else {
+                      VibrationEffect.createOneShot(dur, VibrationEffect.DEFAULT_AMPLITUDE)
+                  }
+                  v.vibrate(effect)
+              } catch (e: Exception) {
               }
           }
           EOF_FILE
@@ -436,6 +559,7 @@ jobs:
           import android.content.Intent
           import android.content.SharedPreferences
           import android.content.pm.ServiceInfo
+          import android.content.res.Configuration
           import android.graphics.Color
           import android.graphics.PixelFormat
           import android.graphics.drawable.GradientDrawable
@@ -449,21 +573,22 @@ jobs:
           import android.os.Vibrator
           import android.os.VibratorManager
           import android.provider.Settings
+          import android.util.DisplayMetrics
           import android.view.Gravity
-          import android.view.HapticFeedbackConstants
           import android.view.MotionEvent
           import android.view.View
           import android.view.ViewConfiguration
           import android.view.WindowManager
           import android.widget.Button
           import android.widget.LinearLayout
-          import android.widget.TextView
           import java.util.Locale
           import kotlin.math.abs
+          import kotlin.math.max
 
           /**
            * Foreground service that shows the floating bubble over other apps.
-           * Tap = pause / resume. Hold ~1.2 s = open the control panel. Drag = move.
+           * Tap = start / pause. Tap the small reset icon = reset. Hold ~0.3 s = open the control panel.
+           * Drag = move (all the way to the screen edges). Tap anywhere outside = close the panel.
            * Time is measured with elapsedRealtime, so it stays correct with the screen off.
            */
           class TimerService : Service() {
@@ -471,14 +596,14 @@ jobs:
               companion object {
                   const val ACTION_REFRESH = "com.example.floatingtimer.REFRESH"
                   const val ACTION_STOP = "com.example.floatingtimer.STOP"
-                  const val EXTRA_MINUTES = "minutes"
+                  const val EXTRA_SECONDS = "seconds"
                   const val EXTRA_AUTOSTART = "autostart"
 
                   private const val CH_RUN = "timer_running"
                   private const val CH_DONE = "timer_done"
                   private const val ID_RUN = 1
                   private const val ID_DONE = 2
-                  private const val LONG_PRESS_MS = 1200L
+                  private const val LONG_PRESS_MS = 300L
 
                   @Volatile
                   var isRunning = false
@@ -489,13 +614,17 @@ jobs:
 
               private var wm: WindowManager? = null
               private var root: LinearLayout? = null
-              private lateinit var bubble: TextView
+              private lateinit var bubble: BubbleViews
               private lateinit var panel: LinearLayout
               private lateinit var btnStart: Button
               private lateinit var btnMode: Button
               private lateinit var rowPresets: LinearLayout
               private lateinit var rowAdjust: LinearLayout
               private lateinit var lp: WindowManager.LayoutParams
+
+              // position to go back to when the panel closes (if opening it had to move the bubble)
+              private var restoreX: Int? = null
+              private var restoreY: Int? = null
 
               private val handler = Handler(Looper.getMainLooper())
               private val sound by lazy { SoundPlayer(this) }
@@ -521,7 +650,7 @@ jobs:
                           return
                       }
                       refreshUi()
-                      handler.postDelayed(this, 200)
+                      handler.postDelayed(this, if (showMs()) 33L else 200L)
                   }
               }
 
@@ -535,6 +664,11 @@ jobs:
               }
 
               override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onConfigurationChanged(newConfig: Configuration) {
+                  super.onConfigurationChanged(newConfig)
+                  root?.post { clampToScreen() }
+              }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   if (intent?.action == ACTION_STOP) {
@@ -550,15 +684,16 @@ jobs:
                           return START_NOT_STICKY
                       }
                       countdown = prefs.getBoolean(Prefs.COUNTDOWN, true)
-                      presetMs = prefs.getInt(Prefs.MINUTES, 25).coerceIn(1, 999) * 60_000L
+                      presetMs = prefs.getInt(Prefs.TOTAL_SECS, prefs.getInt(Prefs.MINUTES, 25) * 60)
+                          .coerceIn(1, 359999) * 1000L
                       buildOverlay()
                       isRunning = true
                   }
 
                   intent?.let {
-                      if (it.hasExtra(EXTRA_MINUTES)) {
+                      if (it.hasExtra(EXTRA_SECONDS)) {
                           countdown = prefs.getBoolean(Prefs.COUNTDOWN, true)
-                          presetMs = it.getIntExtra(EXTRA_MINUTES, 25).coerceIn(1, 999) * 60_000L
+                          presetMs = it.getIntExtra(EXTRA_SECONDS, 1500).coerceIn(1, 359999) * 1000L
                           resetTimer()
                           if (it.getBooleanExtra(EXTRA_AUTOSTART, false)) start()
                       }
@@ -606,7 +741,7 @@ jobs:
                   )
                   return Notification.Builder(this, CH_RUN)
                       .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                      .setContentTitle("Floating Timer")
+                      .setContentTitle("Timer Pro")
                       .setContentText(text)
                       .setContentIntent(openAppIntent())
                       .setOngoing(true)
@@ -616,7 +751,7 @@ jobs:
               }
 
               private fun startAsForeground() {
-                  val n = runningNotification(fmt(shownMs()))
+                  val n = runningNotification(fmt(shownMs(), false))
                   if (Build.VERSION.SDK_INT >= 34) {
                       startForeground(ID_RUN, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
                   } else {
@@ -635,6 +770,39 @@ jobs:
                   nm.notify(ID_DONE, n)
               }
 
+              // ---------- Screen helpers ----------
+
+              @Suppress("DEPRECATION")
+              private fun screenSize(): Pair<Int, Int> {
+                  val dm = DisplayMetrics()
+                  wm?.defaultDisplay?.getRealMetrics(dm)
+                  return Pair(dm.widthPixels, dm.heightPixels)
+              }
+
+              /** The bubble itself may touch every screen edge (the transparent ring around it may go off-screen). */
+              private fun limitX(v: Int): Int {
+                  val (sw, _) = screenSize()
+                  val hi = max(sw - bubble.box.width - bubble.pad, -bubble.pad)
+                  return v.coerceIn(-bubble.pad, hi)
+              }
+
+              private fun limitY(v: Int): Int {
+                  val (_, sh) = screenSize()
+                  val hi = max(sh - bubble.box.height - bubble.pad, -bubble.pad)
+                  return v.coerceIn(-bubble.pad, hi)
+              }
+
+              private fun clampToScreen() {
+                  val r = root ?: return
+                  if (bubble.box.width == 0) return
+                  lp.x = limitX(lp.x)
+                  lp.y = limitY(lp.y)
+                  try {
+                      wm?.updateViewLayout(r, lp)
+                  } catch (e: Exception) {
+                  }
+              }
+
               // ---------- Overlay (bubble + panel) ----------
 
               @SuppressLint("ClickableViewAccessibility")
@@ -643,10 +811,10 @@ jobs:
 
                   val r = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      gravity = Gravity.CENTER_HORIZONTAL
+                      gravity = Gravity.START
                   }
 
-                  bubble = TextView(this).apply { gravity = Gravity.CENTER }
+                  bubble = BubbleViews(this)
 
                   panel = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
@@ -672,9 +840,10 @@ jobs:
                       mkBtn("60") { setPreset(60) }
                   )
                   rowAdjust = row(
-                      mkBtn("-1 min") { adjust(-1) },
-                      mkBtn("+1 min") { adjust(1) },
-                      mkBtn("+5 min") { adjust(5) }
+                      mkBtn("-10s") { adjust(-10) },
+                      mkBtn("+10s") { adjust(10) },
+                      mkBtn("+1m") { adjust(60) },
+                      mkBtn("+5m") { adjust(300) }
                   )
 
                   panel.addView(row(btnStart, mkBtn("Reset") { resetTimer() }))
@@ -684,7 +853,7 @@ jobs:
                   panel.addView(row(mkBtn("Hide panel") { togglePanel() }, mkBtn("Exit", 0xFFE5484D.toInt()) { stopSelf() }))
 
                   r.addView(
-                      bubble,
+                      bubble.holder,
                       LinearLayout.LayoutParams(
                           LinearLayout.LayoutParams.WRAP_CONTENT,
                           LinearLayout.LayoutParams.WRAP_CONTENT
@@ -695,14 +864,17 @@ jobs:
                       LinearLayout.LayoutParams(
                           LinearLayout.LayoutParams.WRAP_CONTENT,
                           LinearLayout.LayoutParams.WRAP_CONTENT
-                      ).apply { topMargin = dp(6) }
+                      ).apply { topMargin = dp(2) }
                   )
 
                   lp = WindowManager.LayoutParams(
                       WindowManager.LayoutParams.WRAP_CONTENT,
                       WindowManager.LayoutParams.WRAP_CONTENT,
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                          WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
                       PixelFormat.TRANSLUCENT
                   ).apply {
                       gravity = Gravity.TOP or Gravity.START
@@ -710,7 +882,15 @@ jobs:
                       y = prefs.getInt(Prefs.Y, dp(120))
                   }
 
-                  // Tap = pause/resume, hold 1.2 s = panel, drag = move
+                  // A tap outside the window (anywhere else on the screen) closes the panel
+                  r.setOnTouchListener { _, e ->
+                      if (e.action == MotionEvent.ACTION_OUTSIDE && panel.visibility == View.VISIBLE) {
+                          togglePanel()
+                      }
+                      false
+                  }
+
+                  // Tap = start/pause, tap reset icon = reset, hold = panel, drag = move
                   val slop = ViewConfiguration.get(this).scaledTouchSlop
                   var downX = 0f
                   var downY = 0f
@@ -718,12 +898,13 @@ jobs:
                   var startY = 0
                   var moved = false
                   var longDone = false
+                  var onReset = false
                   val longRun = Runnable {
                       longDone = true
-                      bubble.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                      touchBuzz(this, prefs, 1.6f)
                       togglePanel()
                   }
-                  bubble.setOnTouchListener { _, e ->
+                  bubble.holder.setOnTouchListener { _, e ->
                       when (e.action) {
                           MotionEvent.ACTION_DOWN -> {
                               downX = e.rawX
@@ -732,7 +913,11 @@ jobs:
                               startY = lp.y
                               moved = false
                               longDone = false
-                              handler.postDelayed(longRun, LONG_PRESS_MS)
+                              val resetLeft = bubble.box.left + bubble.reset.left
+                              onReset = e.x >= resetLeft && e.x <= bubble.box.right + bubble.pad / 2
+                              bubble.showHalo(true, prefs)
+                              touchBuzz(this, prefs)
+                              if (!onReset) handler.postDelayed(longRun, LONG_PRESS_MS)
                               true
                           }
                           MotionEvent.ACTION_MOVE -> {
@@ -741,25 +926,29 @@ jobs:
                               if (!moved && (abs(dx) > slop || abs(dy) > slop)) {
                                   moved = true
                                   handler.removeCallbacks(longRun)
+                                  restoreX = null
+                                  restoreY = null
                               }
                               if (moved) {
-                                  lp.x = (startX + dx.toInt()).coerceAtLeast(0)
-                                  lp.y = (startY + dy.toInt()).coerceAtLeast(0)
+                                  lp.x = limitX(startX + dx.toInt())
+                                  lp.y = limitY(startY + dy.toInt())
                                   wm?.updateViewLayout(root, lp)
                               }
                               true
                           }
                           MotionEvent.ACTION_UP -> {
                               handler.removeCallbacks(longRun)
+                              bubble.showHalo(false, prefs)
                               if (moved) {
                                   prefs.edit().putInt(Prefs.X, lp.x).putInt(Prefs.Y, lp.y).apply()
                               } else if (!longDone) {
-                                  onBubbleTap()
+                                  if (onReset) onResetTap() else onBubbleTap()
                               }
                               true
                           }
                           MotionEvent.ACTION_CANCEL -> {
                               handler.removeCallbacks(longRun)
+                              bubble.showHalo(false, prefs)
                               true
                           }
                           else -> false
@@ -769,6 +958,7 @@ jobs:
                   root = r
                   wm?.addView(r, lp)
                   applyStyle()
+                  r.post { clampToScreen() }
               }
 
               private fun onBubbleTap() {
@@ -779,16 +969,46 @@ jobs:
                   toggleRun()
               }
 
+              private fun onResetTap() {
+                  stopAlarm()
+                  resetTimer()
+              }
+
               private fun togglePanel() {
+                  val r = root ?: return
                   val show = panel.visibility != View.VISIBLE
                   panel.visibility = if (show) View.VISIBLE else View.GONE
-                  root?.post {
-                      val r = root ?: return@post
-                      val screenH = resources.displayMetrics.heightPixels
-                      if (lp.y + r.height > screenH) {
-                          lp.y = (screenH - r.height).coerceAtLeast(0)
+                  if (show) {
+                      // make sure the panel fits on the screen; remember where the bubble was
+                      val spec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                      panel.measure(spec, spec)
+                      val needW = max(bubble.holder.width, panel.measuredWidth)
+                      val needH = bubble.holder.height + panel.measuredHeight + dp(2)
+                      val (sw, sh) = screenSize()
+                      var nx = lp.x
+                      var ny = lp.y
+                      if (lp.x + needW > sw) nx = max(sw - needW, -bubble.pad)
+                      if (lp.y + needH > sh) ny = max(sh - needH, -bubble.pad)
+                      if (nx != lp.x || ny != lp.y) {
+                          restoreX = lp.x
+                          restoreY = lp.y
+                          lp.x = nx
+                          lp.y = ny
                           wm?.updateViewLayout(r, lp)
                       }
+                  } else {
+                      var changed = false
+                      restoreX?.let {
+                          lp.x = it
+                          changed = true
+                      }
+                      restoreY?.let {
+                          lp.y = it
+                          changed = true
+                      }
+                      restoreX = null
+                      restoreY = null
+                      if (changed) wm?.updateViewLayout(r, lp)
                   }
               }
 
@@ -822,11 +1042,11 @@ jobs:
                   }
               }
 
-              /** Applies colour, size, roundness and transparency from the saved settings. */
+              /** Applies colour, size, roundness, shadow and transparency from the saved settings. */
               private fun applyStyle() {
-                  styleBubble(bubble, prefs, if (finished) 0xFFE53935.toInt() else null)
+                  bubble.applyStyle(prefs, if (finished) 0xFFE53935.toInt() else null)
                   root?.alpha = prefs.getInt(Prefs.ALPHA, 90) / 100f
-                  bubble.alpha = if (!running && !finished && accumulated > 0L) 0.6f else 1f
+                  bubble.box.alpha = if (!running && !finished && accumulated > 0L) 0.6f else 1f
               }
 
               // ---------- Timer logic ----------
@@ -837,19 +1057,22 @@ jobs:
               private fun shownMs(): Long =
                   if (countdown) (presetMs - elapsed()).coerceAtLeast(0L) else elapsed()
 
-              private fun fmt(ms: Long): String {
-                  val total = if (countdown) (ms + 999) / 1000 else ms / 1000
+              private fun showMs(): Boolean = prefs.getBoolean(Prefs.SHOW_MS, false)
+
+              private fun fmt(ms: Long, withMs: Boolean): String {
+                  val total = if (countdown && !withMs) (ms + 999) / 1000 else ms / 1000
                   val h = total / 3600
                   val m = (total % 3600) / 60
                   val s = total % 60
-                  return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+                  val base = if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s)
                   else String.format(Locale.US, "%02d:%02d", m, s)
+                  return if (withMs) base + String.format(Locale.US, ".%03d", ms % 1000) else base
               }
 
               private fun refreshUi() {
                   val ms = shownMs()
-                  val t = fmt(ms)
-                  if (bubble.text.toString() != t) bubble.text = t
+                  val t = fmt(ms, showMs())
+                  if (bubble.time.text.toString() != t) bubble.time.text = t
                   btnStart.text = if (running) "Pause" else "Start"
                   btnMode.text = if (countdown) "Mode: Countdown (tap to switch)" else "Mode: Stopwatch (tap to switch)"
                   val vis = if (countdown) View.VISIBLE else View.GONE
@@ -859,7 +1082,7 @@ jobs:
                   val sec = ms / 1000
                   if (sec != lastNotifSecond) {
                       lastNotifSecond = sec
-                      nm.notify(ID_RUN, runningNotification(t))
+                      nm.notify(ID_RUN, runningNotification(fmt(ms, false)))
                   }
               }
 
@@ -904,8 +1127,8 @@ jobs:
                   resetTimer()
               }
 
-              private fun adjust(deltaMin: Int) {
-                  presetMs = (presetMs + deltaMin * 60_000L).coerceAtLeast(60_000L)
+              private fun adjust(deltaSec: Int) {
+                  presetMs = (presetMs + deltaSec * 1000L).coerceIn(1_000L, 359_999_000L)
                   if (finished) resetTimer() else if (running) acquireWake()
                   refreshUi()
               }
@@ -984,8 +1207,10 @@ jobs:
           import android.content.Intent
           import android.content.SharedPreferences
           import android.content.res.ColorStateList
+          import android.content.res.Configuration
           import android.graphics.Color
           import android.graphics.Typeface
+          import android.graphics.drawable.ColorDrawable
           import android.graphics.drawable.GradientDrawable
           import android.media.RingtoneManager
           import android.net.Uri
@@ -993,8 +1218,10 @@ jobs:
           import android.os.Handler
           import android.os.Looper
           import android.provider.Settings
+          import android.text.InputFilter
           import android.text.InputType
           import android.view.Gravity
+          import android.view.MotionEvent
           import android.view.View
           import android.widget.Button
           import android.widget.EditText
@@ -1003,20 +1230,30 @@ jobs:
           import android.widget.SeekBar
           import android.widget.Switch
           import android.widget.TextView
+          import java.util.Locale
 
           class MainActivity : Activity() {
 
-              private val BG_PAGE = 0xFF0E1320.toInt()
-              private val BG_CARD = 0xFF182033.toInt()
               private val ACCENT = 0xFF4F8CFF.toInt()
-              private val TEXT_DIM = 0xFF93A0BA.toInt()
               private val RING_PICK = 7001
+
+              // Theme colours (set in initTheme: Day / Night / Auto)
+              private var night = true
+              private var BG_PAGE = 0
+              private var BG_CARD = 0
+              private var BG_STAGE = 0
+              private var BG_INPUT = 0
+              private var BG_BTN = 0
+              private var TEXT_MAIN = 0
+              private var TEXT_DIM = 0
 
               private lateinit var prefs: SharedPreferences
               private lateinit var permStatus: TextView
               private lateinit var permBtn: Button
-              private lateinit var minutes: EditText
-              private lateinit var preview: TextView
+              private lateinit var tH: EditText
+              private lateinit var tM: EditText
+              private lateinit var tS: EditText
+              private lateinit var pv: BubbleViews
               private lateinit var btnCountdown: Button
               private lateinit var btnStopwatch: Button
               private lateinit var customName: TextView
@@ -1029,6 +1266,7 @@ jobs:
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   prefs = getSharedPreferences(Prefs.NAME, MODE_PRIVATE)
+                  initTheme()
                   setContentView(buildUi())
               }
 
@@ -1038,8 +1276,77 @@ jobs:
               }
 
               override fun onPause() {
+                  saveTime()
                   stopPreview()
                   super.onPause()
+              }
+
+              // ---------- theme ----------
+
+              @Suppress("DEPRECATION")
+              private fun initTheme() {
+                  val mode = prefs.getInt(Prefs.THEME, 0) // 0 = Auto, 1 = Day, 2 = Night
+                  val sysNight = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                      Configuration.UI_MODE_NIGHT_YES
+                  night = when (mode) {
+                      1 -> false
+                      2 -> true
+                      else -> sysNight
+                  }
+                  if (night) {
+                      BG_PAGE = 0xFF0E1320.toInt()
+                      BG_CARD = 0xFF182033.toInt()
+                      BG_STAGE = 0xFF0B0F1A.toInt()
+                      BG_INPUT = 0xFF0B0F1A.toInt()
+                      BG_BTN = 0xFF2A3656.toInt()
+                      TEXT_MAIN = 0xFFFFFFFF.toInt()
+                      TEXT_DIM = 0xFF93A0BA.toInt()
+                  } else {
+                      BG_PAGE = 0xFFEEF1F7.toInt()
+                      BG_CARD = 0xFFFFFFFF.toInt()
+                      BG_STAGE = 0xFFD8DEEB.toInt()
+                      BG_INPUT = 0xFFEEF1F7.toInt()
+                      BG_BTN = 0xFFDCE3F1.toInt()
+                      TEXT_MAIN = 0xFF111827.toInt()
+                      TEXT_DIM = 0xFF5B6B86.toInt()
+                  }
+                  window.setBackgroundDrawable(ColorDrawable(BG_PAGE))
+                  window.statusBarColor = BG_PAGE
+                  window.navigationBarColor = BG_CARD
+                  var f = window.decorView.systemUiVisibility
+                  f = if (night) {
+                      f and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv() and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+                  } else {
+                      f or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                  }
+                  window.decorView.systemUiVisibility = f
+              }
+
+              private fun themeName(): String = when (prefs.getInt(Prefs.THEME, 0)) {
+                  1 -> "Day"
+                  2 -> "Night"
+                  else -> "Auto"
+              }
+
+              // ---------- time fields ----------
+
+              private fun readSeconds(): Int {
+                  val h = tH.text.toString().toIntOrNull() ?: 0
+                  val m = tM.text.toString().toIntOrNull() ?: 0
+                  val s = tS.text.toString().toIntOrNull() ?: 0
+                  return (h * 3600 + m * 60 + s).coerceIn(1, 359999)
+              }
+
+              private fun showSeconds(total: Int) {
+                  tH.setText(String.format(Locale.US, "%02d", total / 3600))
+                  tM.setText(String.format(Locale.US, "%02d", (total % 3600) / 60))
+                  tS.setText(String.format(Locale.US, "%02d", total % 60))
+              }
+
+              private fun saveTime() {
+                  val t = readSeconds()
+                  prefs.edit().putInt(Prefs.TOTAL_SECS, t).apply()
+                  showSeconds(t)
               }
 
               // ---------- actions ----------
@@ -1048,7 +1355,10 @@ jobs:
                   val ok = Settings.canDrawOverlays(this)
                   permStatus.text = if (ok) "Ready. Overlay permission is granted."
                   else "One-time setup: allow \"Display over other apps\" so the bubble can float."
-                  permStatus.setTextColor(if (ok) 0xFF69F0AE.toInt() else 0xFFFFB74D.toInt())
+                  permStatus.setTextColor(
+                      if (ok) (if (night) 0xFF69F0AE.toInt() else 0xFF1B8E4B.toInt())
+                      else (if (night) 0xFFFFB74D.toInt() else 0xFFB36B00.toInt())
+                  )
                   permBtn.visibility = if (ok) View.GONE else View.VISIBLE
               }
 
@@ -1063,13 +1373,14 @@ jobs:
                       askOverlayPermission()
                       return
                   }
-                  val m = minutes.text.toString().toIntOrNull()?.coerceIn(1, 999) ?: 25
-                  prefs.edit().putInt(Prefs.MINUTES, m).apply()
+                  val t = readSeconds()
+                  prefs.edit().putInt(Prefs.TOTAL_SECS, t).apply()
+                  showSeconds(t)
                   stopPreview()
                   startForegroundService(
                       Intent(this, TimerService::class.java)
-                          .putExtra(TimerService.EXTRA_MINUTES, m)
-                          .putExtra(TimerService.EXTRA_AUTOSTART, true)
+                          .putExtra(TimerService.EXTRA_SECONDS, t)
+                          .putExtra(TimerService.EXTRA_AUTOSTART, false)
                   )
                   moveTaskToBack(true)
               }
@@ -1078,8 +1389,13 @@ jobs:
                   stopService(Intent(this, TimerService::class.java))
               }
 
+              private fun updatePreviewText() {
+                  pv.time.text = if (prefs.getBoolean(Prefs.SHOW_MS, false)) "12:34.567" else "12:34"
+              }
+
               private fun refreshAll() {
-                  styleBubble(preview, prefs)
+                  updatePreviewText()
+                  pv.applyStyle(prefs)
                   if (TimerService.isRunning) {
                       startService(Intent(this, TimerService::class.java).setAction(TimerService.ACTION_REFRESH))
                   }
@@ -1157,7 +1473,7 @@ jobs:
                   cornerRadius = dp(r).toFloat()
               }
 
-              private fun label(text: String, sp: Float = 14f, color: Int = Color.WHITE, bold: Boolean = false) =
+              private fun label(text: String, sp: Float = 14f, color: Int = TEXT_MAIN, bold: Boolean = false) =
                   TextView(this).apply {
                       this.text = text
                       textSize = sp
@@ -1171,7 +1487,7 @@ jobs:
                       background = rounded(BG_CARD, 18)
                       setPadding(dp(16), dp(14), dp(16), dp(16))
                   }
-                  c.addView(label(title, 17f, Color.WHITE, true))
+                  c.addView(label(title, 17f, TEXT_MAIN, true))
                   if (subtitle != null) {
                       c.addView(label(subtitle, 12.5f, TEXT_DIM).apply { setPadding(0, dp(2), 0, 0) })
                   }
@@ -1202,11 +1518,30 @@ jobs:
                   minHeight = 0
                   minimumHeight = 0
                   setPadding(dp(14), dp(8), dp(14), dp(8))
-                  setTextColor(Color.WHITE)
-                  background = rounded(0xFF2A3656.toInt(), 10)
+                  setTextColor(TEXT_MAIN)
+                  background = rounded(BG_BTN, 10)
                   stateListAnimator = null
                   setOnClickListener { onClick() }
               }
+
+              private fun mkSwitch(text: String, key: String, def: Boolean, after: () -> Unit = {}) =
+                  Switch(this).apply {
+                      this.text = text
+                      textSize = 15f
+                      setTextColor(TEXT_MAIN)
+                      isChecked = prefs.getBoolean(key, def)
+                      val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+                      thumbTintList = ColorStateList(
+                          states, intArrayOf(ACCENT, if (night) 0xFF8A94A8.toInt() else 0xFFB0B8C8.toInt())
+                      )
+                      trackTintList = ColorStateList(
+                          states, intArrayOf(0x884F8CFF.toInt(), if (night) 0x44FFFFFF else 0x33000000)
+                      )
+                      setOnCheckedChangeListener { _, on ->
+                          prefs.edit().putBoolean(key, on).apply()
+                          after()
+                      }
+                  }
 
               private fun tint(s: SeekBar, color: Int) {
                   s.progressTintList = ColorStateList.valueOf(color)
@@ -1267,7 +1602,7 @@ jobs:
                               background = GradientDrawable().apply {
                                   shape = GradientDrawable.OVAL
                                   setColor(col)
-                                  setStroke(dp(2), 0x55FFFFFF)
+                                  setStroke(dp(2), if (night) 0x55FFFFFF else 0x33000000)
                               }
                               setOnClickListener { applyColor(col, true) }
                           }
@@ -1280,10 +1615,10 @@ jobs:
                   }
 
                   val names = arrayOf("Red", "Green", "Blue")
-                  val tints = intArrayOf(0xFFFF5252.toInt(), 0xFF69F0AE.toInt(), 0xFF448AFF.toInt())
+                  val tints = intArrayOf(0xFFFF5252.toInt(), 0xFF2EB872.toInt(), 0xFF448AFF.toInt())
                   val values = intArrayOf(Color.red(start), Color.green(start), Color.blue(start))
                   for (i in 0..2) {
-                      val head = label("${names[i]}", 12.5f, TEXT_DIM).apply { setPadding(0, dp(8), 0, 0) }
+                      val head = label(names[i], 12.5f, TEXT_DIM).apply { setPadding(0, dp(8), 0, 0) }
                       val sb = SeekBar(this).apply {
                           max = 255
                           progress = values[i]
@@ -1292,9 +1627,8 @@ jobs:
                               override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
                                   if (busy || !fromUser) return
                                   applyColor(
-                                      Color.rgb(
-                                          bars[0]!!.progress, bars[1]!!.progress, bars[2]!!.progress
-                                      ), false
+                                      Color.rgb(bars[0]!!.progress, bars[1]!!.progress, bars[2]!!.progress),
+                                      false
                                   )
                               }
 
@@ -1313,8 +1647,7 @@ jobs:
                   val mark = label("○", 18f, TEXT_DIM)
                   soundMarks[id] = mark
                   val nameBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  val nameTv = label(name, 15f)
-                  nameBox.addView(nameTv)
+                  nameBox.addView(label(name, 15f))
                   if (id == "custom") {
                       customName = label("", 12f, TEXT_DIM)
                       nameBox.addView(customName)
@@ -1344,12 +1677,62 @@ jobs:
                   parent.addView(row)
               }
 
+              private fun timeField(initial: Int): EditText = EditText(this).apply {
+                  inputType = InputType.TYPE_CLASS_NUMBER
+                  filters = arrayOf(InputFilter.LengthFilter(2))
+                  setText(String.format(Locale.US, "%02d", initial))
+                  gravity = Gravity.CENTER
+                  textSize = 26f
+                  typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                  setTextColor(TEXT_MAIN)
+                  background = rounded(BG_INPUT, 12)
+                  setPadding(dp(8), dp(10), dp(8), dp(10))
+                  setSelectAllOnFocus(true)
+              }
+
               // ---------- screen ----------
 
               private fun buildUi(): View {
+                  // Live preview bar: fixed at the bottom, always visible while you edit
+                  pv = BubbleViews(this)
+                  pv.applyStyle(prefs)
+                  updatePreviewText()
+                  pv.holder.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              pv.showHalo(true, prefs)
+                              touchBuzz(this, prefs)
+                          }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> pv.showHalo(false, prefs)
+                      }
+                      true
+                  }
+
+                  val stage = LinearLayout(this).apply {
+                      gravity = Gravity.CENTER
+                      background = rounded(BG_STAGE, 12)
+                      setPadding(dp(8), dp(2), dp(8), dp(2))
+                  }
+                  stage.addView(pv.holder)
+
+                  val bar = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      elevation = dp(10).toFloat()
+                      val r = dp(20).toFloat()
+                      background = GradientDrawable().apply {
+                          setColor(BG_CARD)
+                          cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+                      }
+                      setPadding(dp(16), dp(10), dp(16), dp(12))
+                  }
+                  bar.addView(label("Live preview (touch the bubble to feel the shadow and vibration)", 12f, TEXT_DIM).apply {
+                      setPadding(0, 0, 0, dp(6))
+                  })
+                  bar.addView(stage)
+
                   val col = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(dp(16), dp(28), dp(16), dp(32))
+                      setPadding(dp(16), dp(24), dp(16), dp(20))
                   }
 
                   fun add(v: View) {
@@ -1362,74 +1745,96 @@ jobs:
                       )
                   }
 
-                  // Header
-                  val header = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  header.addView(label("Floating Timer", 30f, Color.WHITE, true))
-                  header.addView(label("A small timer that floats over every app", 14f, TEXT_DIM))
-                  header.setPadding(dp(4), 0, 0, dp(4))
+                  // Header with Day / Night button
+                  val header = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(4), 0, 0, dp(4))
+                  }
+                  val titleBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  titleBox.addView(label("Timer Pro", 28f, TEXT_MAIN, true))
+                  titleBox.addView(label("A small timer that floats over every app", 13.5f, TEXT_DIM))
+                  header.addView(titleBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  header.addView(smallBtn("Theme: ${themeName()}") {
+                      prefs.edit().putInt(Prefs.THEME, (prefs.getInt(Prefs.THEME, 0) + 1) % 3).apply()
+                      recreate()
+                  })
                   add(header)
-
-                  // Live preview
-                  val pv = card("Live preview", "Changes below appear here instantly")
-                  preview = TextView(this).apply {
-                      text = "12:34"
-                      gravity = Gravity.CENTER
-                  }
-                  styleBubble(preview, prefs)
-                  val stage = LinearLayout(this).apply {
-                      gravity = Gravity.CENTER
-                      background = rounded(0xFF0B0F1A.toInt(), 14)
-                      setPadding(0, dp(26), 0, dp(26))
-                  }
-                  stage.addView(preview)
-                  pv.addView(stage, LinearLayout.LayoutParams(
-                      LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                  ).apply { topMargin = dp(10) })
-                  add(pv)
 
                   // Permission
                   val pm = card("Setup")
-                  permStatus = label("", 13.5f, Color.WHITE).apply { setPadding(0, dp(6), 0, dp(8)) }
-                  permBtn = pill("Allow display over other apps", 0xFF39425F.toInt()) { askOverlayPermission() }
+                  permStatus = label("", 13.5f, TEXT_MAIN).apply { setPadding(0, dp(6), 0, dp(8)) }
+                  permBtn = pill("Allow display over other apps", if (night) 0xFF39425F.toInt() else 0xFF5B6B86.toInt()) {
+                      askOverlayPermission()
+                  }
                   pm.addView(permStatus)
                   pm.addView(permBtn)
                   add(pm)
 
                   // Timer
-                  val tm = card("Timer", "Tap the bubble to pause / resume. Hold it 1 second for controls.")
+                  val tm = card("Timer", "The bubble appears paused. Tap it to start / pause, tap ↺ to reset. Hold it for a moment for controls.")
                   val seg = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
                   fun paintSeg() {
                       val cd = prefs.getBoolean(Prefs.COUNTDOWN, true)
-                      btnCountdown.background = rounded(if (cd) ACCENT else 0xFF2A3656.toInt(), 12)
-                      btnStopwatch.background = rounded(if (!cd) ACCENT else 0xFF2A3656.toInt(), 12)
+                      btnCountdown.background = rounded(if (cd) ACCENT else BG_BTN, 12)
+                      btnCountdown.setTextColor(if (cd) Color.WHITE else TEXT_MAIN)
+                      btnStopwatch.background = rounded(if (!cd) ACCENT else BG_BTN, 12)
+                      btnStopwatch.setTextColor(if (!cd) Color.WHITE else TEXT_MAIN)
                   }
                   btnCountdown = pill("Countdown", ACCENT) {
-                      prefs.edit().putBoolean(Prefs.COUNTDOWN, true).apply(); paintSeg()
+                      prefs.edit().putBoolean(Prefs.COUNTDOWN, true).apply()
+                      paintSeg()
                   }
                   btnStopwatch = pill("Stopwatch", ACCENT) {
-                      prefs.edit().putBoolean(Prefs.COUNTDOWN, false).apply(); paintSeg()
+                      prefs.edit().putBoolean(Prefs.COUNTDOWN, false).apply()
+                      paintSeg()
                   }
                   paintSeg()
-                  seg.addView(btnCountdown, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                      .apply { rightMargin = dp(4) })
-                  seg.addView(btnStopwatch, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                      .apply { leftMargin = dp(4) })
+                  seg.addView(
+                      btnCountdown,
+                      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(4) }
+                  )
+                  seg.addView(
+                      btnStopwatch,
+                      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(4) }
+                  )
                   addGap(tm, 10)
                   tm.addView(seg)
 
-                  tm.addView(label("Countdown time (minutes)", 13.5f, TEXT_DIM).apply { setPadding(0, dp(12), 0, dp(2)) })
-                  minutes = EditText(this).apply {
-                      inputType = InputType.TYPE_CLASS_NUMBER
-                      setText(prefs.getInt(Prefs.MINUTES, 25).toString())
-                      setTextColor(Color.WHITE)
-                      textSize = 20f
-                      typeface = Typeface.DEFAULT_BOLD
-                      background = rounded(0xFF0B0F1A.toInt(), 12)
-                      setPadding(dp(14), dp(10), dp(14), dp(10))
+                  tm.addView(label("Countdown time (HH : MM : SS)", 13.5f, TEXT_DIM).apply {
+                      setPadding(0, dp(14), 0, dp(4))
+                  })
+                  val total = prefs.getInt(Prefs.TOTAL_SECS, prefs.getInt(Prefs.MINUTES, 25) * 60).coerceIn(1, 359999)
+                  tH = timeField(total / 3600)
+                  tM = timeField((total % 3600) / 60)
+                  tS = timeField(total % 60)
+                  val tRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
                   }
-                  tm.addView(minutes)
-                  addGap(tm, 14)
-                  tm.addView(pill("▶  Start floating timer", ACCENT) { startTimer() })
+                  fun colon() = label(":", 26f, TEXT_DIM, true).apply { gravity = Gravity.CENTER }
+                  tRow.addView(tH, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  tRow.addView(colon(), LinearLayout.LayoutParams(dp(18), LinearLayout.LayoutParams.WRAP_CONTENT))
+                  tRow.addView(tM, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  tRow.addView(colon(), LinearLayout.LayoutParams(dp(18), LinearLayout.LayoutParams.WRAP_CONTENT))
+                  tRow.addView(tS, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  tm.addView(tRow)
+
+                  addGap(tm, 8)
+                  val quick = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  listOf(5, 10, 25, 60).forEach { mn ->
+                      quick.addView(
+                          smallBtn("$mn min") { showSeconds(mn * 60) },
+                          LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                              .apply { setMargins(dp(2), 0, dp(2), 0) }
+                      )
+                  }
+                  tm.addView(quick)
+                  tm.addView(label("Stopwatch mode counts up from zero and ignores this time.", 12f, TEXT_DIM).apply {
+                      setPadding(0, dp(8), 0, 0)
+                  })
+                  addGap(tm, 12)
+                  tm.addView(pill("▶  Show floating bubble", ACCENT) { startTimer() })
                   addGap(tm, 8)
                   tm.addView(pill("■  Stop and remove bubble", 0xFFC62F3A.toInt()) { stopTimer() })
                   add(tm)
@@ -1438,8 +1843,8 @@ jobs:
                   add(colorCard("Bubble color", "Background of the bubble", Prefs.BG, Prefs.DEF_BG))
                   add(colorCard("Text color", "Color of the time digits", Prefs.FG, Color.WHITE))
 
-                  // Shape and size
-                  val sh = card("Shape and size")
+                  // Style
+                  val sh = card("Bubble style")
                   sliderRow(sh, "Roundness", 0, 100, Prefs.RADIUS, 100) {
                       when {
                           it <= 0 -> "Square"
@@ -1449,24 +1854,26 @@ jobs:
                   }
                   sliderRow(sh, "Size", 8, 40, Prefs.SIZE, Prefs.DEF_SIZE) { "$it" }
                   sliderRow(sh, "Opacity", 30, 100, Prefs.ALPHA, 90) { "$it%" }
+                  addGap(sh, 12)
+                  sh.addView(mkSwitch("Show milliseconds in the bubble", Prefs.SHOW_MS, false) { refreshAll() })
                   add(sh)
 
-                  // Sound
+                  // Touch feedback
+                  val tf = card("Touch feedback", "What happens when you touch the bubble")
+                  addGap(tf, 6)
+                  tf.addView(mkSwitch("Shadow behind the bubble", Prefs.SHADOW_ON, true) { refreshAll() })
+                  sliderRow(tf, "Shadow strength", 0, 100, Prefs.SHADOW_AMT, 60) { "$it%" }
+                  addGap(tf, 12)
+                  tf.addView(mkSwitch("Vibrate when touched", Prefs.HAPTIC_ON, true))
+                  sliderRow(tf, "Vibration strength", 1, 100, Prefs.HAPTIC_AMT, 50) { "$it%" }
+                  add(tf)
+
+                  // Alarm
                   val sd = card("Alarm", "What happens when the countdown ends")
                   addGap(sd, 6)
-                  sd.addView(Switch(this).apply {
-                      text = "Play sound"
-                      setTextColor(Color.WHITE)
-                      isChecked = prefs.getBoolean(Prefs.SOUND_ON, true)
-                      setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(Prefs.SOUND_ON, on).apply() }
-                  })
-                  addGap(sd, 4)
-                  sd.addView(Switch(this).apply {
-                      text = "Vibrate"
-                      setTextColor(Color.WHITE)
-                      isChecked = prefs.getBoolean(Prefs.VIB_ON, true)
-                      setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(Prefs.VIB_ON, on).apply() }
-                  })
+                  sd.addView(mkSwitch("Play sound", Prefs.SOUND_ON, true))
+                  addGap(sd, 6)
+                  sd.addView(mkSwitch("Vibrate", Prefs.VIB_ON, true))
                   sd.addView(label("Choose a sound", 13.5f, TEXT_DIM).apply { setPadding(0, dp(14), 0, dp(2)) })
                   Synth.NAMES.forEach { (id, name) -> soundRow(sd, id, name) }
                   soundRow(sd, "phone", "Phone alarm sound", "Your phone's default alarm")
@@ -1478,22 +1885,42 @@ jobs:
 
                   // Tips
                   val tp = card("Good to know")
-                  tp.addView(label(
-                      "• Tap the bubble: pause / resume (also silences the alarm)\n" +
-                          "• Hold the bubble for about 1 second: open the control panel\n" +
-                          "• Drag the bubble to move it\n" +
-                          "• All settings are saved automatically\n" +
-                          "• If the timer stops in the background: Settings > Apps > Floating Timer > " +
-                          "Battery > Unrestricted",
-                      13.5f, TEXT_DIM
-                  ).apply { setPadding(0, dp(8), 0, 0); setLineSpacing(0f, 1.15f) })
+                  tp.addView(
+                      label(
+                          "• Tap the bubble: start / pause (also silences the alarm)\n" +
+                              "• Tap the ↺ icon on the bubble: reset the timer\n" +
+                              "• Hold the bubble for a moment: open the control panel\n" +
+                              "• Tap anywhere else on the screen to close the panel\n" +
+                              "• Drag the bubble to move it\n" +
+                              "• All settings are saved automatically\n" +
+                              "• If the timer stops in the background: Settings > Apps > Timer Pro > " +
+                              "Battery > Unrestricted",
+                          13.5f, TEXT_DIM
+                      ).apply { setPadding(0, dp(8), 0, 0); setLineSpacing(0f, 1.15f) }
+                  )
                   add(tp)
 
-                  return ScrollView(this).apply {
+                  val scroll = ScrollView(this).apply {
                       setBackgroundColor(BG_PAGE)
                       isFillViewport = true
                       addView(col)
                   }
+                  val rootLayout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(BG_PAGE)
+                  }
+                  rootLayout.addView(
+                      scroll,
+                      LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                  )
+                  rootLayout.addView(
+                      bar,
+                      LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      )
+                  )
+                  return rootLayout
               }
           }
           EOF_FILE
