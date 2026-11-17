@@ -228,6 +228,20 @@ jobs:
           fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
           /**
+           * Shadow layer behind the bubble. It must not decide the size of its parent,
+           * so it measures 0 unless the parent gives it an exact size.
+           */
+          class HaloView(ctx: Context) : View(ctx) {
+              override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                  val w = if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.EXACTLY)
+                      MeasureSpec.getSize(widthMeasureSpec) else 0
+                  val h = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.EXACTLY)
+                      MeasureSpec.getSize(heightMeasureSpec) else 0
+                  setMeasuredDimension(w, h)
+              }
+          }
+
+          /**
            * The floating bubble: time text + small reset icon inside a rounded box,
            * with a soft shadow ("halo") behind it that appears while it is touched.
            * Used by the floating service and by the live preview in the app.
@@ -242,26 +256,26 @@ jobs:
                   orientation = LinearLayout.HORIZONTAL
                   gravity = Gravity.CENTER_VERTICAL
               }
-              val halo = View(ctx).apply { alpha = 0f }
+              val halo = HaloView(ctx).apply { alpha = 0f }
               val holder = FrameLayout(ctx)
-              val pad: Int = (16 * ctx.resources.displayMetrics.density).toInt()
+              val pad: Int = 0
 
               init {
                   box.addView(time)
                   box.addView(reset)
                   holder.setPadding(pad, pad, pad, pad)
                   holder.addView(
-                      halo,
-                      FrameLayout.LayoutParams(
-                          FrameLayout.LayoutParams.MATCH_PARENT,
-                          FrameLayout.LayoutParams.MATCH_PARENT
-                      )
-                  )
-                  holder.addView(
                       box,
                       FrameLayout.LayoutParams(
                           FrameLayout.LayoutParams.WRAP_CONTENT,
                           FrameLayout.LayoutParams.WRAP_CONTENT
+                      )
+                  )
+                  holder.addView(
+                      halo,
+                      FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT,
+                          FrameLayout.LayoutParams.MATCH_PARENT
                       )
                   )
               }
@@ -294,29 +308,15 @@ jobs:
                       cornerRadius = corner
                   }
 
-                  // Shadow behind the bubble (three soft layers)
+                  // Dark "pressed" effect: a dark layer over the bubble while it is touched
                   val amt = p.getInt(Prefs.SHADOW_AMT, 60).coerceIn(0, 100)
-                  val extra = (d * (3f + 11f * amt / 100f)).toInt()
-                  val a = 110f + 120f * amt / 100f
-                  val layers = ArrayList<Drawable>()
-                  for (i in 0..2) {
-                      layers.add(GradientDrawable().apply {
-                          setColor(Color.argb((a * (0.25f + 0.3f * i)).toInt().coerceIn(0, 255), 0, 0, 0))
-                          cornerRadius = corner + extra - extra * i / 3f
-                      })
+                  halo.background = GradientDrawable().apply {
+                      setColor(Color.argb((30f + 150f * amt / 100f).toInt().coerceIn(0, 255), 0, 0, 0))
+                      cornerRadius = corner
                   }
-                  val ld = LayerDrawable(layers.toTypedArray())
-                  for (i in 0..2) {
-                      val inset = extra * i / 3
-                      ld.setLayerInset(i, inset, inset, inset, inset)
-                  }
-                  halo.background = ld
-                  val hp = halo.layoutParams as FrameLayout.LayoutParams
-                  hp.setMargins(-extra, -extra, -extra, -extra)
-                  halo.layoutParams = hp
               }
 
-              /** Shows or hides the shadow (only if the shadow option is on). */
+              /** Shows or hides the dark pressed effect (only if the option is on). */
               fun showHalo(on: Boolean, p: SharedPreferences) {
                   halo.animate().cancel()
                   if (!p.getBoolean(Prefs.SHADOW_ON, true)) {
@@ -1725,7 +1725,7 @@ jobs:
                       }
                       setPadding(dp(16), dp(10), dp(16), dp(12))
                   }
-                  bar.addView(label("Live preview (touch the bubble to feel the shadow and vibration)", 12f, TEXT_DIM).apply {
+                  bar.addView(label("Live preview (touch the bubble to see the dark effect and feel the vibration)", 12f, TEXT_DIM).apply {
                       setPadding(0, 0, 0, dp(6))
                   })
                   bar.addView(stage)
@@ -1861,8 +1861,8 @@ jobs:
                   // Touch feedback
                   val tf = card("Touch feedback", "What happens when you touch the bubble")
                   addGap(tf, 6)
-                  tf.addView(mkSwitch("Shadow behind the bubble", Prefs.SHADOW_ON, true) { refreshAll() })
-                  sliderRow(tf, "Shadow strength", 0, 100, Prefs.SHADOW_AMT, 60) { "$it%" }
+                  tf.addView(mkSwitch("Dark effect when touched", Prefs.SHADOW_ON, true) { refreshAll() })
+                  sliderRow(tf, "Dark effect strength", 0, 100, Prefs.SHADOW_AMT, 60) { "$it%" }
                   addGap(tf, 12)
                   tf.addView(mkSwitch("Vibrate when touched", Prefs.HAPTIC_ON, true))
                   sliderRow(tf, "Vibration strength", 1, 100, Prefs.HAPTIC_AMT, 50) { "$it%" }
